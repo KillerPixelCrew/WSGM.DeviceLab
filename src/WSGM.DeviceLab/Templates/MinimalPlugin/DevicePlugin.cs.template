@@ -1,0 +1,325 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 NightHammer1000.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using WSGM.Device.Sdk.Capabilities;
+using WSGM.Device.Sdk.Input;
+using WSGM.Device.Sdk.Lifecycle;
+using WSGM.Device.Sdk.Plugin;
+
+namespace {{ROOT_NAMESPACE}};
+
+/// <summary>Minimal exact-device plugin starter with safe in-memory API examples.</summary>
+public sealed class DevicePlugin : IDevicePlugin
+{
+    private const string ExampleToggleId = "example.integration-toggle";
+    private const string UnavailableSensorId = "example.unavailable-sensor";
+
+    private IPluginHostAdapter? _host;
+    private long _cycleGeneration;
+    private bool _capturedExampleValue;
+    private bool _exampleValue;
+    private bool _active;
+    private bool _lastOutputSilent = true;
+    private int _restorations;
+
+    /// <inheritdoc />
+    public string PackageId => "{{PACKAGE_ID_CS}}";
+
+    /// <inheritdoc />
+    public ValueTask<PluginDetectionResult> DetectAsync(
+        PluginDetectionContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        bool matched = string.Equals(
+                context.Identity.SystemManufacturer,
+                "{{MANUFACTURER_CS}}",
+                StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                context.Identity.BaseboardProduct,
+                "{{BOARD_CS}}",
+                StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                context.Identity.SystemSku,
+                "{{SYSTEM_SKU_CS}}",
+                StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                context.Identity.BiosVersion,
+                "{{BIOS_CS}}",
+                StringComparison.OrdinalIgnoreCase)
+            && context.Identity.UsbEndpoints.Any(endpoint =>
+                string.Equals(endpoint.VendorId, "{{USB_VENDOR_CS}}", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(endpoint.ProductId, "{{USB_PRODUCT_CS}}", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(endpoint.DeviceRelease, "{{USB_RELEASE_CS}}", StringComparison.OrdinalIgnoreCase));
+        return ValueTask.FromResult(new PluginDetectionResult
+        {
+            Matched = matched,
+            DeviceDefinitionId = matched ? "{{DEVICE_ID_CS}}" : null,
+            Reason = matched
+                ? null
+                : new CapabilityReason(CapabilityReasonCode.Unsupported, "Exact device identity did not match."),
+        });
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<PluginStartResult> StartAsync(
+        PluginStartContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!string.Equals(context.DeviceDefinitionId, "{{DEVICE_ID_CS}}", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Activation requires the exact detected device definition.");
+        }
+
+        // Replace this in-memory snapshot with a read from the device before adding any hardware write.
+        _capturedExampleValue = false;
+        _exampleValue = _capturedExampleValue;
+        _cycleGeneration = context.CycleGeneration;
+        _host = context.Host;
+        _active = true;
+        _lastOutputSilent = true;
+        _restorations = 0;
+
+        await context.Host.PublishDescriptorsAsync(
+            new CapabilityDescriptorSet
+            {
+                Generation = 1,
+                CycleGeneration = _cycleGeneration,
+                Descriptors =
+                [
+                    new CapabilityDescriptor
+                    {
+                        CapabilityId = ExampleToggleId,
+                        Role = CapabilityRole.GenericToggle,
+                        ValueKind = CapabilityValueKind.Boolean,
+                        Display = new CapabilityDisplay
+                        {
+                            Key = DisplayKey.Custom,
+                            CustomLabel = "Replace with a verified device toggle",
+                        },
+                        SupportsRead = true,
+                        SupportsWrite = true,
+                        Persistence = CapabilityPersistence.Volatile,
+                    },
+                    new CapabilityDescriptor
+                    {
+                        CapabilityId = UnavailableSensorId,
+                        Role = CapabilityRole.GenericReadOnly,
+                        ValueKind = CapabilityValueKind.Integer,
+                        Display = new CapabilityDisplay
+                        {
+                            Key = DisplayKey.Custom,
+                            CustomLabel = "Replace with an optional device sensor",
+                        },
+                        SupportsRead = true,
+                        Persistence = CapabilityPersistence.Volatile,
+                    },
+                ],
+            },
+            cancellationToken).ConfigureAwait(false);
+        await context.Host.PublishCapabilityStateAsync(
+            ExampleState(_exampleValue),
+            cancellationToken).ConfigureAwait(false);
+        await context.Host.PublishCapabilityStateAsync(
+            new CapabilityState
+            {
+                CapabilityId = UnavailableSensorId,
+                Available = false,
+                Reason = new CapabilityReason(
+                    CapabilityReasonCode.PrerequisiteMissing,
+                    "Replace this example with the exact missing provider or endpoint."),
+                Quality = HardwareStateQuality.Unknown,
+                DescriptorGeneration = 1,
+                CycleGeneration = _cycleGeneration,
+            },
+            cancellationToken).ConfigureAwait(false);
+        // A neutral full state is safe. Replace it with normalized physical samples after acquisition.
+        await context.Host.PublishControllerSampleAsync(
+            CanonicalControllerSample.Neutral(1, _cycleGeneration, DateTimeOffset.UtcNow),
+            cancellationToken).ConfigureAwait(false);
+        return new PluginStartResult
+        {
+            State = PluginOperationalState.Degraded,
+            Reason = new CapabilityReason(
+                CapabilityReasonCode.PrerequisiteMissing,
+                "Replace the unavailable example with the exact optional provider or endpoint."),
+        };
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<CapabilityCommandResult> ExecuteCommandAsync(
+        CapabilityCommand command,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_active
+            || command.ExpectedCycleGeneration != _cycleGeneration
+            || command.ExpectedDescriptorGeneration != 1)
+        {
+            return Rejected(command, CapabilityReasonCode.GenerationChanged);
+        }
+
+        if (!string.Equals(command.CapabilityId, ExampleToggleId, StringComparison.Ordinal)
+            || command.RequestedValue is not { Kind: CapabilityValueKind.Boolean, BooleanValue: not null })
+        {
+            return Rejected(command, CapabilityReasonCode.Unsupported);
+        }
+
+        // Replace this in-memory assignment with identity/range revalidation, a serialized hardware
+        // write, and independent readback. Keep publishing only the verified semantic result.
+        _exampleValue = command.RequestedValue.BooleanValue.Value;
+        await _host!.PublishCapabilityStateAsync(ExampleState(_exampleValue), cancellationToken)
+            .ConfigureAwait(false);
+        return new CapabilityCommandResult
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.AppliedVerified,
+            ReadbackValue = command.RequestedValue,
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
+    /// <inheritdoc />
+    public async ValueTask SuspendAsync(PluginQuiesceContext context, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_host is not null)
+        {
+            await _host.PublishControllerSampleAsync(
+                CanonicalControllerSample.Neutral(2, _cycleGeneration, DateTimeOffset.UtcNow),
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<PluginStartResult> ResumeAsync(
+        PluginResumeContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _cycleGeneration = context.CycleGeneration;
+        _active = true;
+        if (_host is not null)
+        {
+            await _host.PublishControllerSampleAsync(
+                CanonicalControllerSample.Neutral(1, _cycleGeneration, DateTimeOffset.UtcNow),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return new PluginStartResult
+        {
+            State = PluginOperationalState.Degraded,
+            Reason = new CapabilityReason(
+                CapabilityReasonCode.PrerequisiteMissing,
+                "Replace the unavailable example with the exact optional provider or endpoint."),
+        };
+    }
+
+    /// <inheritdoc />
+    public ValueTask<PluginDiagnostics> GetDiagnosticsAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(new PluginDiagnostics
+        {
+            Values = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["state"] = _active ? "active" : "stopped",
+                ["example-value"] = _exampleValue ? "on" : "off",
+                ["haptic-output"] = _lastOutputSilent ? "silent" : "active",
+                ["restorations"] = _restorations.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            },
+        });
+    }
+
+    /// <inheritdoc />
+    public ValueTask ApplyHapticOutputAsync(HapticOutputFrame frame, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        cancellationToken.ThrowIfCancellationRequested();
+        // This starter records canonical output without touching hardware. Replace it with a bounded
+        // plugin-owned encoder and always apply an explicit zero-output frame during cleanup.
+        _lastOutputSilent = frame.IsSilent;
+        return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public ValueTask<PluginControllerRelease> ReleaseControllerAsync(
+        PluginControllerReleaseContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _lastOutputSilent = true;
+        return ValueTask.FromResult(new PluginControllerRelease
+        {
+            Step = ControllerHandoffStep.NotStarted,
+            Result = ControllerHandoffResult.ReleasedUnverified,
+        });
+    }
+
+    /// <inheritdoc />
+    public ValueTask SetControllerManagementAsync(
+        PluginControllerManagementContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<PluginStopResult> StopAsync(
+        PluginStopContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_active && _host is not null)
+        {
+            // Restore the captured original before reporting Clean. Real hardware restoration must
+            // use the same serialized transport and readback rules as an ordinary write.
+            _exampleValue = _capturedExampleValue;
+            await _host.PublishCapabilityStateAsync(ExampleState(_exampleValue), cancellationToken)
+                .ConfigureAwait(false);
+            await _host.PublishControllerSampleAsync(
+                CanonicalControllerSample.Neutral(3, _cycleGeneration, DateTimeOffset.UtcNow),
+                cancellationToken).ConfigureAwait(false);
+            _lastOutputSilent = true;
+            _restorations++;
+        }
+
+        _active = false;
+        return new PluginStopResult { Status = PluginStopStatus.Clean };
+    }
+
+    /// <inheritdoc />
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    private CapabilityState ExampleState(bool value) => new()
+    {
+        CapabilityId = ExampleToggleId,
+        Available = true,
+        ObservedValue = new CapabilityValue
+        {
+            Kind = CapabilityValueKind.Boolean,
+            BooleanValue = value,
+        },
+        Quality = HardwareStateQuality.Verified,
+        ObservedAt = DateTimeOffset.UtcNow,
+        DescriptorGeneration = 1,
+        CycleGeneration = _cycleGeneration,
+    };
+
+    private static CapabilityCommandResult Rejected(
+        CapabilityCommand command,
+        CapabilityReasonCode reason) => new()
+        {
+            CommandId = command.CommandId,
+            Outcome = CommandOutcome.Rejected,
+            Reason = new CapabilityReason(reason),
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+}

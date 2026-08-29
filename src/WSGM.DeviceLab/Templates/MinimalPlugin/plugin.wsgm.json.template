@@ -1,0 +1,8 @@
+{
+  "id": "{{PACKAGE_ID_JSON}}",
+  "name": "{{DISPLAY_NAME_JSON}}",
+  "version": "0.1.0",
+  "apiVersion": {{API_VERSION}},
+  "entryAssembly": "{{ROOT_NAMESPACE}}.dll",
+  "entryType": "{{ROOT_NAMESPACE}}.DevicePlugin"
+}
