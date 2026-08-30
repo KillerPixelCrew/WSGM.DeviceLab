@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using WSGM.DeviceLab.Capture;
@@ -180,11 +182,27 @@ internal static class FixtureExtractionWorkflow
         output.Flush(flushToDisk: true);
     }
 
+    /// <summary>Turns one source or analyzer identifier into a distinct filesystem-safe name.</summary>
+    /// <param name="value">The identifier as the capture recorded it.</param>
+    /// <returns>A sanitized name that is unique to that exact identifier.</returns>
+    /// <remarks>
+    /// The hash suffix is what makes it injective. Sanitizing alone maps distinct identifiers such
+    /// as <c>pad/a</c> and <c>pad?a</c> onto the same name, and the dictionary assignment then
+    /// silently replaced the first stream: the fixture still validated while omitting source data
+    /// and expected results, so replay no longer represented the capture it came from.
+    /// </remarks>
     private static string SafeName(string value)
     {
-        string result = string.Concat(value.Select(character =>
+        string sanitized = string.Concat(value.Select(character =>
             char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' ? character : '-'));
-        return string.IsNullOrWhiteSpace(result) ? "unknown" : result;
+        if (string.IsNullOrWhiteSpace(sanitized))
+        {
+            sanitized = "unknown";
+        }
+
+        string digest = Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..8];
+        return $"{sanitized}-{digest}";
     }
 
     private static byte[] WithNewline(byte[] bytes)

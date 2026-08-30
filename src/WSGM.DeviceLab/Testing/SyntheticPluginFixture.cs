@@ -8,6 +8,7 @@ using WSGM.Device.Sdk.Identity;
 using WSGM.Device.Sdk.Input;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Plugin;
+using WSGM.Device.Sdk.Settings;
 using WSGM.Device.Sdk.Testing;
 
 namespace WSGM.DeviceLab.Testing;
@@ -181,6 +182,156 @@ internal sealed class SyntheticDockPlugin : IDevicePlugin
     internal const string BeaconCapabilityId = "dock.beacon";
     internal const string UnavailableSensorCapabilityId = "dock.ambient-temperature";
 
+    /// <summary>Settings id exercising the declared-section path.</summary>
+    internal const string PollIntervalSettingId = "dock.poll-interval";
+
+    /// <summary>Settings id exercising the undeclared-section fallback.</summary>
+    internal const string OrphanSettingId = "dock.stray";
+
+    /// <summary>
+    /// A settings declaration covering every value kind the SDK allows, so the settings page can be
+    /// exercised without hardware.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately includes one setting naming a section that is never declared. That path renders
+    /// into a WSGM-owned fallback rather than dropping the control, and a fixture that only ever
+    /// declared well-formed manifests would never exercise it.
+    /// </remarks>
+    internal static PluginSettingsManifest SettingsManifest { get; } = new()
+    {
+        Sections =
+        [
+            new PluginSettingSection
+            {
+                SectionId = "dock.general",
+                Key = SettingSectionKey.General,
+            },
+            new PluginSettingSection
+            {
+                SectionId = "dock.advanced",
+                Key = SettingSectionKey.Advanced,
+                SortOrder = 10,
+            },
+        ],
+        Settings =
+        [
+            new PluginSettingDescriptor
+            {
+                SettingId = PollIntervalSettingId,
+                ValueKind = CapabilityValueKind.Integer,
+                Display = new CapabilityDisplay
+                {
+                    Key = DisplayKey.Custom,
+                    CustomLabel = "Poll interval",
+                },
+                SectionId = "dock.general",
+                Minimum = 100,
+                Maximum = 5000,
+                Step = 100,
+                Unit = CapabilityUnit.Millisecond,
+                Default = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Integer,
+                    IntegerValue = 1000,
+                },
+            },
+            new PluginSettingDescriptor
+            {
+                SettingId = "dock.verbose",
+                ValueKind = CapabilityValueKind.Boolean,
+                Display = new CapabilityDisplay
+                {
+                    Key = DisplayKey.Custom,
+                    CustomLabel = "Verbose tracing",
+                },
+                SectionId = "dock.advanced",
+                Default = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Boolean,
+                    BooleanValue = false,
+                },
+            },
+            new PluginSettingDescriptor
+            {
+                SettingId = "dock.mode",
+                ValueKind = CapabilityValueKind.Choice,
+                Display = new CapabilityDisplay
+                {
+                    Key = DisplayKey.Custom,
+                    CustomLabel = "Dock mode",
+                },
+                SectionId = "dock.advanced",
+                Choices =
+                [
+                    new CapabilityChoice("quiet", new CapabilityDisplay
+                    {
+                        Key = DisplayKey.Custom,
+                        CustomLabel = "Quiet",
+                    }),
+                    new CapabilityChoice("balanced", new CapabilityDisplay
+                    {
+                        Key = DisplayKey.Custom,
+                        CustomLabel = "Balanced",
+                    }),
+                ],
+                Default = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Choice,
+                    ChoiceValue = "balanced",
+                },
+            },
+            new PluginSettingDescriptor
+            {
+                SettingId = "dock.tint",
+                ValueKind = CapabilityValueKind.Color,
+                Display = new CapabilityDisplay
+                {
+                    Key = DisplayKey.Custom,
+                    CustomLabel = "Indicator tint",
+                },
+                SectionId = "dock.advanced",
+                Default = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Color,
+                    ColorValue = 0x00A0FF,
+                },
+            },
+            new PluginSettingDescriptor
+            {
+                SettingId = "dock.label",
+                ValueKind = CapabilityValueKind.Text,
+                Display = new CapabilityDisplay
+                {
+                    Key = DisplayKey.Custom,
+                    CustomLabel = "Dock label",
+                },
+                SectionId = "dock.general",
+                MaximumLength = 32,
+                Default = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Text,
+                    TextValue = "Dock",
+                },
+            },
+            new PluginSettingDescriptor
+            {
+                SettingId = OrphanSettingId,
+                ValueKind = CapabilityValueKind.Boolean,
+                Display = new CapabilityDisplay
+                {
+                    Key = DisplayKey.Custom,
+                    CustomLabel = "Stray control",
+                },
+                SectionId = "dock.never-declared",
+                Default = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Boolean,
+                    BooleanValue = false,
+                },
+            },
+        ],
+    };
+
     private static readonly HapticCapabilities OutputCapabilities = new()
     {
         LowFrequency = OutputChannelSupport.Native,
@@ -290,6 +441,9 @@ internal sealed class SyntheticDockPlugin : IDevicePlugin
                     },
                 ],
             },
+            cancellationToken).ConfigureAwait(false);
+        await context.Host.PublishSettingsManifestAsync(
+            SettingsManifest,
             cancellationToken).ConfigureAwait(false);
         await context.Host.PublishCapabilityStateAsync(State(_beaconValue), cancellationToken).ConfigureAwait(false);
         await context.Host.PublishCapabilityStateAsync(
