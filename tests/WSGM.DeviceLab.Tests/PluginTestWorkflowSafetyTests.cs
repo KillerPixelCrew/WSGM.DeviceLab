@@ -423,7 +423,7 @@ public sealed class PluginTestWorkflowSafetyTests
         };
         File.WriteAllBytes(
             Path.Combine(package, PluginPackageWorkflow.ManifestPath),
-            SdkManifestTests.Serialize(manifest));
+            PluginManifestFixture.Serialize(manifest));
         return package;
     }
 

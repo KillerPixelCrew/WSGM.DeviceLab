@@ -195,7 +195,7 @@ public sealed class DeviceLabPackagingTests
         WriteManagedPe(Path.Combine(source, "Synthetic.Dock.dll"));
         File.WriteAllBytes(
             Path.Combine(source, "plugin.wsgm.json"),
-            SdkManifestTests.Serialize(SdkManifestTests.Manifest()));
+            PluginManifestFixture.Serialize(PluginManifestFixture.Manifest()));
         return source;
     }
 

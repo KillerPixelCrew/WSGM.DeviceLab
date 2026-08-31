@@ -20,9 +20,10 @@ scaffold is moved to another machine. The checked-in `example.*` implementation 
 teaching code. It is safe for local detection/lifecycle tests, but replace it with verified device
 behavior before installation.
 
-This generated starter derives from WSGM and is licensed under GPL-3.0-or-later. Keep
-`LICENSE.txt` with its source and package output, and retain the SPDX and copyright header when
-adapting `DevicePlugin.cs`.
+This plugin is your own work and you choose its licence. It links `WSGM.Device.Sdk`, which is MIT,
+so nothing here obliges you to any particular one — a closed-source vendor plugin is fine. The
+starter ships an MIT `LICENSE.txt` because that constrains you least; put your name in it, or
+replace it outright. WSGM itself is GPL-3.0-or-later, but you are not linking WSGM.
 
 Build, copy the produced DLL beside `plugin.wsgm.json`, then run:
 

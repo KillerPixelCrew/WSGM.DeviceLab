@@ -20,15 +20,15 @@
     <PackageReference Include="System.Management" Version="10.0.0" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\WSGM.Device.Sdk\WSGM.Device.Sdk.csproj" />
+    <ProjectReference
+        Include="..\..\external\WSGM.Device.Sdk\src\WSGM.Device.Sdk\WSGM.Device.Sdk.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <!-- The scaffold's LICENSE.txt is a checked-in template, not WSGM's own licence file. A
+         generated plugin links only the MIT SDK, so stamping it with the application's GPL-3 (and
+         with this project's copyright holder) claimed something untrue about someone else's work. -->
     <EmbeddedResource Include="Templates\MinimalPlugin\*.template">
       <WithCulture>false</WithCulture>
-    </EmbeddedResource>
-    <EmbeddedResource Include="..\..\LICENSE">
-      <Link>Templates\MinimalPlugin\LICENSE.txt.template</Link>
-      <LogicalName>WSGM.DeviceLab.Templates.MinimalPlugin.LICENSE.txt.template</LogicalName>
     </EmbeddedResource>
     <None Update="THIRD_PARTY_NOTICES.md"
           CopyToOutputDirectory="PreserveNewest"

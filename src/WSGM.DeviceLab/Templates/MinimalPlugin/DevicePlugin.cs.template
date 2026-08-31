@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 NightHammer1000.
+// This scaffold is yours. It carries no licence header on purpose: pick one, then say so here and
+// in LICENSE.txt beside it. The starter ships MIT because that constrains you least.
 
 using System;
 using System.Collections.Generic;

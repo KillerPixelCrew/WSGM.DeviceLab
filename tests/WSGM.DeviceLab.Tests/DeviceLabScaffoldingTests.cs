@@ -68,12 +68,17 @@ public sealed class DeviceLabScaffoldingTests
                 && string.Equals((string?)item.Attribute("CopyToPublishDirectory"), "PreserveNewest", StringComparison.Ordinal));
         Assert.Contains("LICENSE.txt", result.Files);
         Assert.True(File.Exists(Path.Combine(result.OutputDirectory, "LICENSE.txt")));
-        Assert.StartsWith(
-            "GNU GENERAL PUBLIC LICENSE",
-            File.ReadAllText(Path.Combine(result.OutputDirectory, "LICENSE.txt")).TrimStart(),
-            StringComparison.Ordinal);
-        Assert.StartsWith(
-            "// SPDX-License-Identifier: GPL-3.0-or-later",
+        // A scaffolded plugin links the MIT SDK, never WSGM, so its author picks its licence. The
+        // starter ships MIT with a placeholder rather than stamping the plugin with WSGM's GPL-3
+        // and this project's copyright holder, which claimed something untrue about their work.
+        string scaffoldedLicense =
+            File.ReadAllText(Path.Combine(result.OutputDirectory, "LICENSE.txt")).TrimStart();
+        Assert.StartsWith("MIT License", scaffoldedLicense, StringComparison.Ordinal);
+        Assert.Contains("<your name here>", scaffoldedLicense, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "GNU GENERAL PUBLIC LICENSE", scaffoldedLicense, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "SPDX-License-Identifier",
             File.ReadAllText(Path.Combine(result.OutputDirectory, "DevicePlugin.cs")),
             StringComparison.Ordinal);
 

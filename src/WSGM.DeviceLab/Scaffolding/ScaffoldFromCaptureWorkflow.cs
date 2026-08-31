@@ -263,8 +263,9 @@ internal static partial class ScaffoldFromCaptureWorkflow
         ArgumentNullException.ThrowIfNull(boundaries);
         if (boundaries.RepositoryRoot is { Length: > 0 } root)
         {
-            string candidate = Path.GetFullPath(
-                Path.Combine(root, "src", "WSGM.Device.Sdk", "WSGM.Device.Sdk.csproj"));
+            string candidate = Path.GetFullPath(Path.Combine(
+                root, "external", "WSGM.Device.Sdk", "src", "WSGM.Device.Sdk",
+                "WSGM.Device.Sdk.csproj"));
             if (File.Exists(candidate))
             {
                 return $"<ProjectReference Include=\"{Xml(candidate)}\" />";
