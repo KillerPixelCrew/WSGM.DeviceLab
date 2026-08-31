@@ -35,7 +35,8 @@ internal static partial class WindowsInventoryCollector
         "gamepad",
     ];
 
-    private static IReadOnlyList<GraphicsAdapterInventory> CollectGraphicsAdapters()
+    private static IReadOnlyList<GraphicsAdapterInventory> CollectGraphicsAdapters(
+        ICollection<InventoryCollectionIssue> collectionIssues)
     {
         List<GraphicsAdapterInventory> adapters = [];
         try
@@ -69,9 +70,21 @@ internal static partial class WindowsInventoryCollector
                 }
             }
         }
-        catch (ManagementException)
+        catch (ManagementException exception)
         {
-            // Other inventory lanes remain useful when video-controller WMI is unavailable.
+            collectionIssues.Add(new InventoryCollectionIssue
+            {
+                Lane = "graphics",
+                Error = exception.ErrorCode.ToString(),
+            });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            collectionIssues.Add(new InventoryCollectionIssue
+            {
+                Lane = "graphics",
+                Error = "AccessDenied",
+            });
         }
 
         return [.. adapters.OrderBy(adapter => adapter.InstanceId, StringComparer.Ordinal)];

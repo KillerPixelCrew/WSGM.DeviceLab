@@ -514,9 +514,22 @@ internal static class AttendedPluginActionRunner
             && string.Equals(candidate.InstanceId, descriptor.InstanceId, StringComparison.Ordinal)
             && candidate.DescriptorGeneration == descriptorSet.Generation
             && candidate.CycleGeneration == controllerGeneration);
-        return state is { Available: true, ObservedValue.Kind: CapabilityValueKind.Boolean }
-            && state.ObservedValue.BooleanValue is true
-            && state.Quality is HardwareStateQuality.Observed or HardwareStateQuality.Verified;
+        if (state is not { Available: true }
+            || state.Quality is not (HardwareStateQuality.Observed or HardwareStateQuality.Verified))
+        {
+            return false;
+        }
+
+        return descriptor.ValueKind switch
+        {
+            CapabilityValueKind.None => state.ObservedValue is null
+                || state.ObservedValue.Kind is CapabilityValueKind.None,
+            CapabilityValueKind.Boolean => state.ObservedValue is
+            { Kind: CapabilityValueKind.Boolean, BooleanValue: true },
+            CapabilityValueKind.Choice => state.ObservedValue is
+            { Kind: CapabilityValueKind.Choice, ChoiceValue: "plugin" },
+            _ => false,
+        };
     }
 
     private static bool TryParseValue(

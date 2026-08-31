@@ -87,7 +87,7 @@ internal static class GlyphPackageImportWorkflow
             return Report(
                 [],
                 imported.Errors.Select(error => new PluginPackageValidationIssue(
-                    $"glyph-{error.Code.ToString().ToLowerInvariant()}",
+                    $"glyph-{PluginPackageWorkflow.StableCode(error.Code)}",
                     error.Path,
                     $"{error.ProfileId}: {error.Message}"))
                     .OrderBy(issue => issue.Path, StringComparer.Ordinal)

@@ -187,6 +187,7 @@ internal static class ReadProbeResponseValidator
                 sample.NormalizedValue,
                 sample.CrossCheckValue,
                 StringComparison.OrdinalIgnoreCase),
+            ReadProbeCrossCheckKind.Present => !string.IsNullOrWhiteSpace(sample.CrossCheckValue),
             ReadProbeCrossCheckKind.InRange => sample.CrossCheckNumericValue is { } numeric
                 && crossCheck.MinimumValue is { } minimum
                 && crossCheck.MaximumValue is { } maximum

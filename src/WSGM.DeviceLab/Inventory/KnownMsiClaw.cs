@@ -186,7 +186,7 @@ internal static class KnownMsiClaw
             0, 255),
         Probe("msi.claw-a2vm.fan-rpm", ReadProbeFamily.FanRpm,
             "root/WMI:MSI_ACPI.Get_Fan:0", "fan-control", ReadProbeValueKind.Text, 5, 5,
-            null, null),
+            null, null, stable: false, crossCheck: ReadProbeCrossCheckKind.Present),
         Probe("msi.claw-a2vm.charge-limit", ReadProbeFamily.ChargeState,
             "root/WMI:MSI_ACPI.Get_Data:0xd7", "charge-policy", ReadProbeValueKind.Integer, 2, 2,
             0, 100),
@@ -201,7 +201,9 @@ internal static class KnownMsiClaw
         int minimumLength,
         int maximumLength,
         long? minimum = null,
-        long? maximum = null) => new()
+        long? maximum = null,
+        bool stable = true,
+        ReadProbeCrossCheckKind crossCheck = ReadProbeCrossCheckKind.Equal) => new()
         {
             Id = id,
             Version = 1,
@@ -220,11 +222,12 @@ internal static class KnownMsiClaw
                 AllowedStatusCodes = [1],
                 MinimumValue = minimum,
                 MaximumValue = maximum,
+                MustBeStable = stable,
             },
             CrossCheck = new ReadProbeCrossCheck
             {
                 Id = $"{id}.repeat-read",
-                Kind = ReadProbeCrossCheckKind.Equal,
+                Kind = crossCheck,
             },
             RequiresElevation = true,
         };

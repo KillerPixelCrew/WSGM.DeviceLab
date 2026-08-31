@@ -37,6 +37,11 @@ internal static class DeviceLabCli
             return args.Length == 0 ? Usage : Success;
         }
 
+        if (ValidateArguments(args) is { } argumentError)
+        {
+            return UsageError(argumentError);
+        }
+
         try
         {
             return args[0] switch
@@ -58,10 +63,11 @@ internal static class DeviceLabCli
                 _ => Unknown(args[0]),
             };
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
-            or InvalidDataException or JsonException or ArgumentException or NotSupportedException
-            or InvalidOperationException or BadImageFormatException or TypeLoadException)
+        catch (Exception exception)
         {
+            // Community plugin code is intentionally outside WSGM's exception vocabulary. The CLI
+            // boundary must still return a deterministic failure instead of losing the report and
+            // process status to an arbitrary plugin exception.
             Console.Error.WriteLine($"Command failed: {exception.Message}");
             return Failed;
         }
@@ -124,7 +130,7 @@ internal static class DeviceLabCli
         }
 
         string executable = DeviceLabExecutable.CurrentPath;
-        DeviceLabCandidateResult result = new DeviceLabApplication(RepositoryRoot(), executable).Candidates(input);
+        DeviceLabApplication application = new(RepositoryRoot(), executable);
         string? runId = Option(options, "--run");
         if (runId is not null)
         {
@@ -134,13 +140,16 @@ internal static class DeviceLabCli
                 return UsageError("probe-read --run requires --out-dir <directory>.");
             }
 
-            DeviceLabReadProbeExecutionResult execution = await new DeviceLabApplication(
-                RepositoryRoot(),
-                executable).RunReadProbeAsync(input, runId, output, CancellationToken.None).ConfigureAwait(false);
+            DeviceLabReadProbeExecutionResult execution = await application.RunReadProbeAsync(
+                input,
+                runId,
+                output,
+                CancellationToken.None).ConfigureAwait(false);
             WriteJson(execution);
             return execution.Run?.Status is ReadProbeRunStatus.Accepted ? Success : Failed;
         }
 
+        DeviceLabCandidateResult result = application.Candidates(input);
         WriteJson(new
         {
             probes = result.ReadOnlyProbes,
@@ -395,15 +404,46 @@ internal static class DeviceLabCli
             return Failed;
         }
 
-        var hardware = await Application().RunAttendedPluginAsync(
-            hardwareArguments.PackageDirectory,
-            hardwareArguments.InventoryPath,
-            hardwareArguments.StateDirectory,
-            action,
-            confirmed: true,
-            CancellationToken.None).ConfigureAwait(false);
+        PluginTestReport hardware;
+        try
+        {
+            hardware = await RunWithConsoleCancellationAsync(token =>
+                Application().RunAttendedPluginAsync(
+                    hardwareArguments.PackageDirectory,
+                    hardwareArguments.InventoryPath,
+                    hardwareArguments.StateDirectory,
+                    action,
+                    confirmed: true,
+                    token)).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            Console.Error.WriteLine("Hardware action cancelled after plugin cleanup completed.");
+            return Failed;
+        }
         WriteJson(hardware);
         return hardware.Passed ? Success : Failed;
+    }
+
+    private static async Task<T> RunWithConsoleCancellationAsync<T>(
+        Func<CancellationToken, Task<T>> operation)
+    {
+        using CancellationTokenSource cancellation = new();
+        void handler(object? _, ConsoleCancelEventArgs eventArgs)
+        {
+            eventArgs.Cancel = true;
+            cancellation.Cancel();
+        }
+
+        Console.CancelKeyPress += handler;
+        try
+        {
+            return await operation(cancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            Console.CancelKeyPress -= handler;
+        }
     }
 
     private static int RunGlyph(ReadOnlySpan<string> args)
@@ -438,6 +478,67 @@ internal static class DeviceLabCli
 
     private static string? RepositoryRoot() => DeviceLabRepositoryLocator.Find(Environment.CurrentDirectory)
         ?? DeviceLabRepositoryLocator.Find(AppContext.BaseDirectory);
+
+    /// <summary>Rejects misspelled options before any workflow can observe their absence.</summary>
+    /// <param name="args">Complete CLI arguments, including the command.</param>
+    /// <returns>A usage error for the first unknown token, or null when the command owns every token.</returns>
+    internal static string? ValidateArguments(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            return null;
+        }
+
+        ReadOnlySpan<string> tail = args.AsSpan(1);
+        return args[0] switch
+        {
+            "inventory" => UnknownToken(tail, 0, ["--shareable"], ["--out-dir", "-o"]),
+            "candidates" => UnknownToken(tail, 0, [], ["--from", "-f", "--device-id"]),
+            "probe-read" => UnknownToken(tail, 0, [], ["--from", "-f", "--run", "--out-dir", "-o"]),
+            "capture" => UnknownToken(tail, 1, [], ["--recipe", "--out-dir", "-o"]),
+            "correlate" => UnknownToken(tail, 1, [], ["--action", "--sources"]),
+            "fixture" => UnknownToken(tail, 1, [], ["--from", "-f", "--id", "--out-dir", "-o"]),
+            "scaffold" => UnknownToken(tail, 0, [], ["--from", "-f", "--out-dir", "-o"]),
+            "pack" => UnknownToken(tail, 1, [], ["--out", "-o"]),
+            "test" when tail.Length > 0 && tail[0] is "hardware" => null,
+            "test" when tail.Length > 0 && tail[0] is "plugin" =>
+                UnknownToken(tail, 2, [], ["--from", "-f"]),
+            _ => null,
+        };
+    }
+
+    private static string? UnknownToken(
+        ReadOnlySpan<string> args,
+        int positionalCount,
+        string[] flags,
+        string[] valuedOptions)
+    {
+        int index = Math.Min(positionalCount, args.Length);
+        while (index < args.Length)
+        {
+            string token = args[index];
+            if (flags.Contains(token, StringComparer.Ordinal))
+            {
+                index++;
+                continue;
+            }
+
+            if (valuedOptions.Contains(token, StringComparer.Ordinal))
+            {
+                if (index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal))
+                {
+                    return $"Option '{token}' requires a value.";
+                }
+
+                index += 2;
+                continue;
+            }
+
+            return $"Unknown option or argument '{token}'.";
+        }
+
+        return null;
+    }
 
     private static bool Flag(ReadOnlySpan<string> args, string name)
     {

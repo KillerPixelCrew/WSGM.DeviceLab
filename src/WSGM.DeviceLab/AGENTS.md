@@ -1,6 +1,6 @@
 # WSGM.DeviceLab
 
-The single JIT-only Device Lab application owns inventory, known-device comparison, passive
+The separate Device Lab application owns inventory, known-device comparison, passive
 capture, compiled read probes, scaffolding, local plugin testing, glyph import, validation, and
 packaging. Its no-argument and `gui` modes start Avalonia; every documented command is routed by the
 same console-subsystem executable. Keep the GUI and CLI thin over shared application services.
@@ -12,7 +12,7 @@ same console-subsystem executable. Keep the GUI and CLI thin over shared applica
   operation. Never disable Device Integration or race the production plugin.
 - Read probes are compiled, typed, exact-device matched, rate-limited, deadline-bounded,
   response-validated, and run in the disposable hidden self-worker mode. That mode
-  must not become a generic device-access broker or production DeviceHost IPC surface.
+  must not become a generic device-access broker or production runtime protocol.
 - The self-worker process is expected to be killed. It owns no durable state and must leave nothing
   behind that a crash could strand.
 - Every output path is explicit. Reject the live `%LOCALAPPDATA%\WSGM` directory, repository root,

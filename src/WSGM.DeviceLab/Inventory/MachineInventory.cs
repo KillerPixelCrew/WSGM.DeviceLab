@@ -61,8 +61,21 @@ internal sealed record MachineInventory
     /// <summary>Bounded passive topology generations for baseline and imported change fixtures.</summary>
     public IReadOnlyList<TopologyGenerationInventory> TopologyGenerations { get; init; } = [];
 
+    /// <summary>Inventory lanes that could not be queried, distinct from a successful empty result.</summary>
+    public IReadOnlyList<InventoryCollectionIssue> CollectionIssues { get; init; } = [];
+
     /// <summary>When the sweep ran, in UTC.</summary>
     public required DateTimeOffset CapturedAt { get; init; }
+}
+
+/// <summary>A read-only inventory lane that failed before it could report observations.</summary>
+internal sealed record InventoryCollectionIssue
+{
+    /// <summary>Stable lane name, such as <c>graphics</c> or <c>usb</c>.</summary>
+    public required string Lane { get; init; }
+
+    /// <summary>Stable failure category without machine-specific exception text.</summary>
+    public required string Error { get; init; }
 }
 
 /// <summary>SMBIOS and firmware identity as read from the machine.</summary>

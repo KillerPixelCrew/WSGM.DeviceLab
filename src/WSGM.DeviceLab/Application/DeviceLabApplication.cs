@@ -112,6 +112,14 @@ internal sealed class DeviceLabApplication(string? repositoryRoot, string device
         CancellationToken cancellationToken = default)
     {
         MachineInventory inventory = ReadInventory(inventoryPath, cancellationToken);
+        return Candidates(inventory, targetDeviceId, cancellationToken);
+    }
+
+    private static DeviceLabCandidateResult Candidates(
+        MachineInventory inventory,
+        string? targetDeviceId,
+        CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         string target = string.IsNullOrWhiteSpace(targetDeviceId) ? DeviceId(inventory) : targetDeviceId;
         KnownDeviceFingerprint fingerprint = KnownMsiClaw.Create();
@@ -150,7 +158,7 @@ internal sealed class DeviceLabApplication(string? repositoryRoot, string device
         ArgumentException.ThrowIfNullOrWhiteSpace(probeId);
         MachineInventory inventory = ReadInventory(inventoryPath, cancellationToken);
         DeviceLabCandidateResult candidateResult = Candidates(
-            inventoryPath,
+            inventory,
             targetDeviceId: null,
             cancellationToken: cancellationToken);
         ReadProbeMetadata probe = candidateResult.ReadOnlyProbes.SingleOrDefault(item =>
@@ -346,7 +354,7 @@ internal sealed class DeviceLabApplication(string? repositoryRoot, string device
 
     /// <summary>Loads one local plugin and runs only its exact detector.</summary>
     /// <param name="packageDirectory">Validated local package directory.</param>
-    /// <param name="inventoryPath">Current inventory JSON.</param>
+    /// <param name="inventoryPath">Inventory JSON whose identity is supplied to detection.</param>
     /// <param name="cancellationToken">Cancels the detection test.</param>
     /// <returns>Local load and detection result.</returns>
     public Task<PluginTestReport> TestPluginAsync(
@@ -359,7 +367,10 @@ internal sealed class DeviceLabApplication(string? repositoryRoot, string device
 
     /// <summary>Runs one explicitly confirmed plugin activation and mandatory cleanup.</summary>
     /// <param name="packageDirectory">Validated local package directory.</param>
-    /// <param name="inventoryPath">Current inventory JSON.</param>
+    /// <param name="inventoryPath">
+    /// Operator-reviewed inventory JSON. The action recollects live identity and never uses this
+    /// imported document as its activation identity.
+    /// </param>
     /// <param name="stateDirectory">New explicit package state directory.</param>
     /// <param name="action">One explicit semantic action selected by the local operator.</param>
     /// <param name="confirmed">Immediate operator confirmation for this run.</param>
@@ -371,14 +382,24 @@ internal sealed class DeviceLabApplication(string? repositoryRoot, string device
         string stateDirectory,
         AttendedPluginActionRequest action,
         bool confirmed,
-        CancellationToken cancellationToken) => PluginTestWorkflow.RunAttendedAsync(
+        CancellationToken cancellationToken)
+    {
+        // The imported inventory is useful operator context but cannot authorize a hardware action:
+        // it may describe another machine or an earlier topology. Validate its shape, then recollect
+        // identity from the machine that will actually run the plugin.
+        _ = ReadInventory(inventoryPath, cancellationToken);
+        DeviceIdentitySnapshot liveIdentity = ToPluginIdentity(WindowsInventoryCollector.Collect(
+            DateTimeOffset.UtcNow,
+            cancellationToken: cancellationToken));
+        return PluginTestWorkflow.RunAttendedAsync(
             packageDirectory,
-            ToPluginIdentity(ReadInventory(inventoryPath, cancellationToken)),
+            liveIdentity,
             stateDirectory,
             action,
             confirmed,
             Boundaries(),
             cancellationToken);
+    }
 
     /// <summary>Runs offline package validation without loading plugin code.</summary>
     /// <param name="packageDirectory">Package source directory.</param>

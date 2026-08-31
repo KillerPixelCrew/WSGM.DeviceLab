@@ -9,8 +9,8 @@ using System.Threading.Tasks;
 
 namespace WSGM.DeviceLab.Probes;
 
-// These typed profile APIs deliberately live only in Device Lab's hidden self-worker. DeviceHost and
-// its IPC never reference this assembly, so production activation cannot discover or invoke them.
+// These typed profiles live only in Device Lab's disposable self-worker; the production plugin
+// runtime never references this assembly, so normal device activation cannot invoke them.
 internal interface IReadProbeProfile
 {
     CompiledReadProbeDescriptor Descriptor { get; }
@@ -99,6 +99,17 @@ internal static class ReadProbeExecutor
         {
             return Response(ReadProbeWorkerStatus.Disconnected, samples, exception.Message);
         }
+        catch (ManagementException exception)
+        {
+            ReadProbeWorkerStatus status = exception.ErrorCode switch
+            {
+                ManagementStatus.AccessDenied => ReadProbeWorkerStatus.AccessDenied,
+                ManagementStatus.InvalidNamespace or ManagementStatus.InvalidClass
+                    => ReadProbeWorkerStatus.PrerequisiteMissing,
+                _ => ReadProbeWorkerStatus.Disconnected,
+            };
+            return Response(status, samples, exception.ErrorCode.ToString());
+        }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
             return Response(ReadProbeWorkerStatus.Rejected, samples, "Compiled probe exceeded its deadline.");
@@ -123,7 +134,7 @@ internal static class ReadProbeExecutor
 // These MSI profiles compile the exact reviewed getter, request byte, response shape, board family,
 // endpoint, and rate into the disposable self-worker. The request envelope cannot substitute a method or address.
 // Get_* still crosses the vendor provider and is therefore an explicit local read; it is never
-// exposed through production DeviceHost IPC and it never falls back to a Set_* method.
+// exposed as a production runtime command and it never falls back to a Set_* method.
 internal abstract class MsiWmiReadProbeProfile : IReadProbeProfile
 {
     protected MsiWmiReadProbeProfile(

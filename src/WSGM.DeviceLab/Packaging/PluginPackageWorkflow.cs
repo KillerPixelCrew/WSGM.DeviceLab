@@ -90,7 +90,7 @@ internal static class PluginPackageWorkflow
         if (!manifestRead.IsValid || manifestRead.Manifest is null)
         {
             issues.AddRange(manifestRead.Errors.Select(error =>
-                Issue(error.Code.ToString(), error.Path, error.Message)));
+                Issue(StableCode(error.Code), error.Path, error.Message)));
             return Report(null, null, [.. issues]);
         }
 
@@ -258,6 +258,27 @@ internal static class PluginPackageWorkflow
                 throw;
             }
         }
+    }
+
+    /// <summary>Formats enum-backed issue codes as the CLI's stable lower-kebab vocabulary.</summary>
+    /// <param name="value">Typed SDK or importer error.</param>
+    /// <returns>A lower-kebab issue code.</returns>
+    internal static string StableCode(Enum value)
+    {
+        string name = value.ToString();
+        StringBuilder result = new(name.Length + 8);
+        for (int index = 0; index < name.Length; index++)
+        {
+            char character = name[index];
+            if (index > 0 && char.IsUpper(character))
+            {
+                result.Append('-');
+            }
+
+            result.Append(char.ToLowerInvariant(character));
+        }
+
+        return result.ToString();
     }
 
     private static PluginPackageValidationReport? CaptureSource(

@@ -90,6 +90,23 @@ internal sealed class SystemReadProbeProcessLauncher : IReadProbeProcessLauncher
                 Error = "Device Lab's read-probe worker exceeded its deadline and was killed.",
             };
         }
+        catch (OperationCanceledException)
+        {
+            // Closing the GUI or pressing Ctrl+C must not leave the disposable worker holding its
+            // endpoint. Kill the complete tree before the caller observes cancellation.
+            TryKill(process);
+            using CancellationTokenSource exitDeadline = new(TimeSpan.FromSeconds(2));
+            try
+            {
+                await process.WaitForExitAsync(exitDeadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Kill already made the strongest available teardown request. Preserve the
+                // caller's cancellation rather than replacing it with a cleanup timeout.
+            }
+            throw;
+        }
 
         string error = await errorRead.ConfigureAwait(false);
         return new ReadProbeProcessOutcome
@@ -225,7 +242,11 @@ internal static class ReadProbeWorkerSupervisor
         ReadProbeProcessOutcome process = await launcher.RunAsync(
             executablePath,
             arguments,
-            TimeSpan.FromMilliseconds(metadata.TimeoutMilliseconds),
+            // The worker owns the semantic deadline and needs a short interval after cancelling to
+            // serialize its DeadlineExceeded response. The supervisor is only the final process
+            // containment boundary; giving both the same deadline made graceful timeout reports
+            // unreachable and misclassified every slow WMI call as a killed worker.
+            ProcessDeadline(metadata),
             resultPath,
             cancellationToken).ConfigureAwait(false);
 
@@ -268,6 +289,12 @@ internal static class ReadProbeWorkerSupervisor
 
         return ReadProbeOutcomeClassifier.ClassifyResponse(metadata, response);
     }
+
+    /// <summary>Whole-process deadline including time for the worker to publish its own timeout.</summary>
+    /// <param name="metadata">Compiled semantic worker deadline.</param>
+    /// <returns>The outer containment deadline.</returns>
+    internal static TimeSpan ProcessDeadline(ReadProbeMetadata metadata) =>
+        TimeSpan.FromMilliseconds(metadata.TimeoutMilliseconds + 2_000);
 
     private static ReadProbeRunResult Result(ReadProbeRunStatus status, string message) => new()
     {

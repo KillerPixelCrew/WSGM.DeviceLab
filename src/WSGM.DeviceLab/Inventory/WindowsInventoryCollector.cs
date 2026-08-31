@@ -42,13 +42,16 @@ internal static partial class WindowsInventoryCollector
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        List<InventoryCollectionIssue> collectionIssues = [];
         MachineInventory collected = new()
         {
             SchemaVersion = CurrentSchemaVersion,
             Firmware = CollectSection(CollectFirmware, cancellationToken),
             Processor = CollectSection(CollectProcessor, cancellationToken),
-            GraphicsAdapters = CollectSection(CollectGraphicsAdapters, cancellationToken),
-            UsbInterfaces = CollectUsbInterfaces(cancellationToken),
+            GraphicsAdapters = CollectSection(
+                () => CollectGraphicsAdapters(collectionIssues),
+                cancellationToken),
+            UsbInterfaces = CollectUsbInterfaces(cancellationToken, collectionIssues),
             WmiClasses = CollectWmiClasses(wmiClassesToProbe ?? [], cancellationToken),
             SerialEndpoints = CollectSection(CollectSerialEndpoints, cancellationToken),
             Sensors = CollectSection(CollectSensors, cancellationToken),
@@ -56,6 +59,7 @@ internal static partial class WindowsInventoryCollector
             Processes = CollectSection(CollectRelevantProcesses, cancellationToken),
             Services = CollectSection(CollectRelevantServices, cancellationToken),
             ScheduledTasks = CollectSection(CollectRelevantScheduledTasks, cancellationToken),
+            CollectionIssues = collectionIssues,
             CapturedAt = capturedAt,
         };
         collected = collected with
@@ -100,9 +104,9 @@ internal static partial class WindowsInventoryCollector
 
     private static FirmwareInventory CollectFirmware()
     {
-        ManagementObject? system = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_ComputerSystem");
-        ManagementObject? board = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_BaseBoard");
-        ManagementObject? bios = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_BIOS");
+        using ManagementObject? system = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_ComputerSystem");
+        using ManagementObject? board = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_BaseBoard");
+        using ManagementObject? bios = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_BIOS");
 
         string? ecVersion = null;
         if (bios is not null)
@@ -133,7 +137,7 @@ internal static partial class WindowsInventoryCollector
 
     private static ProcessorInventory? CollectProcessor()
     {
-        ManagementObject? cpu = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_Processor");
+        using ManagementObject? cpu = QuerySingle("root\\CIMV2", "SELECT * FROM Win32_Processor");
         if (cpu is null)
         {
             return null;
@@ -155,7 +159,8 @@ internal static partial class WindowsInventoryCollector
     }
 
     private static IReadOnlyList<UsbInterfaceInventory> CollectUsbInterfaces(
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ICollection<InventoryCollectionIssue> collectionIssues)
     {
         List<UsbInterfaceInventory> interfaces = [];
 
@@ -197,9 +202,21 @@ internal static partial class WindowsInventoryCollector
                 }
             }
         }
-        catch (ManagementException)
+        catch (ManagementException exception)
         {
-            // A machine that refuses the PnP query still produces the rest of the inventory.
+            collectionIssues.Add(new InventoryCollectionIssue
+            {
+                Lane = "usb",
+                Error = exception.ErrorCode.ToString(),
+            });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            collectionIssues.Add(new InventoryCollectionIssue
+            {
+                Lane = "usb",
+                Error = "AccessDenied",
+            });
         }
 
         interfaces.Sort((a, b) => string.CompareOrdinal(a.InstanceId, b.InstanceId));

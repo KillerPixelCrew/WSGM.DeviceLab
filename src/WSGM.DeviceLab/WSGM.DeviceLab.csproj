@@ -7,7 +7,6 @@
     <AssemblyName>wsgm-device</AssemblyName>
     <RootNamespace>WSGM.DeviceLab</RootNamespace>
     <SelfContained>true</SelfContained>
-    <PublishAot>false</PublishAot>
     <PublishSingleFile>false</PublishSingleFile>
     <!-- LibraryImport generates unsafe marshalling stubs for the cfgmgr32 inventory calls. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -17,7 +16,7 @@
     <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
-    <!-- Device Lab is deliberately JIT-only; WMI must never reach the NativeAOT WSGM executable. -->
+    <!-- Device Lab inventory and probes use WMI; WSGM proper has no direct System.Management dependency. -->
     <PackageReference Include="System.Management" Version="10.0.0" />
   </ItemGroup>
   <ItemGroup>

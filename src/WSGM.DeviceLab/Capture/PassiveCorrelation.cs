@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Threading;
 
@@ -167,34 +166,6 @@ internal static class PassiveCorrelationAnalyzer
             .ThenBy(finding => finding.SourceId, StringComparer.Ordinal)
             .ThenBy(finding => finding.ByteOffset)];
     }
-
-    /// <summary>Projects one finding into the versioned derived-analysis schema with raw links.</summary>
-    /// <param name="analysisId">Stable result ID.</param>
-    /// <param name="finding">Correlation-only candidate.</param>
-    /// <returns>Reviewable derived result.</returns>
-    public static CaptureAnalysisResult ToAnalysisResult(
-        string analysisId,
-        PassiveCorrelationFinding finding) => new()
-        {
-            SchemaVersion = CaptureSchema.CurrentVersion,
-            ResultId = analysisId,
-            AnalyzerId = "passive-byte-correlation",
-            AnalyzerVersion = "1.0.0",
-            Meaning = $"Byte {finding.ByteOffset} on '{finding.SourceId}' correlated with the guided action and returned on release.",
-            Values =
-        [
-            new CaptureAnalysisValue { Key = "correlation-kind", Value = finding.CorrelationKind },
-            new CaptureAnalysisValue { Key = "source", Value = finding.SourceId },
-            new CaptureAnalysisValue { Key = "offset", Value = finding.ByteOffset.ToString(CultureInfo.InvariantCulture), Unit = "byte" },
-            new CaptureAnalysisValue { Key = "baseline", Value = finding.BaselineValue.ToString("x2", CultureInfo.InvariantCulture) },
-            new CaptureAnalysisValue { Key = "action", Value = finding.ActionValue.ToString("x2", CultureInfo.InvariantCulture) },
-            new CaptureAnalysisValue { Key = "release", Value = finding.ReleaseValue.ToString("x2", CultureInfo.InvariantCulture) },
-            new CaptureAnalysisValue { Key = "score", Value = finding.Score.ToString("0.000", CultureInfo.InvariantCulture) },
-        ],
-            SupportingEventIds = finding.SupportingEventIds,
-            CounterexampleEventIds = finding.CounterexampleEventIds,
-            Limitations = PassiveCaptureLimitations.All,
-        };
 
     private static int MinimumWidth(params CaptureStreamEvent[][] phases)
     {

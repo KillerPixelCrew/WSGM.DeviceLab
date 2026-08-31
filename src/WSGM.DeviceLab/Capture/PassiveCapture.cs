@@ -75,7 +75,6 @@ internal sealed class PassiveCaptureTimeline
     private long _maximumQpc;
     private long? _deviceGeneration;
     private int _clockSegment;
-    private EventDiscontinuity _pendingDiscontinuity;
 
     /// <summary>Creates an empty capture timeline.</summary>
     /// <param name="clock">Receipt clock shared by every source.</param>
@@ -120,12 +119,7 @@ internal sealed class PassiveCaptureTimeline
             bool generationChanged = _deviceGeneration is { } generation
                 && observation.DeviceGeneration != generation;
 
-            if (_pendingDiscontinuity is not EventDiscontinuity.None)
-            {
-                discontinuity = _pendingDiscontinuity;
-                _pendingDiscontinuity = EventDiscontinuity.None;
-            }
-            else if (sourceClockReset)
+            if (sourceClockReset)
             {
                 discontinuity = EventDiscontinuity.ClockReset;
                 explicitSegment = true;
@@ -175,16 +169,6 @@ internal sealed class PassiveCaptureTimeline
         }
     }
 
-    /// <summary>Begins a new segment for the next received event after suspend/resume.</summary>
-    public void MarkSuspendResume()
-    {
-        lock (_gate)
-        {
-            _clockSegment++;
-            _pendingDiscontinuity = EventDiscontinuity.SuspendResume;
-        }
-    }
-
     /// <summary>Returns raw events in receipt order.</summary>
     /// <returns>An immutable snapshot.</returns>
     public IReadOnlyList<CaptureStreamEvent> SnapshotByReceipt()
@@ -195,16 +179,25 @@ internal sealed class PassiveCaptureTimeline
         }
     }
 
-    /// <summary>Returns a QPC view without discarding original global receipt sequence.</summary>
-    /// <returns>Events ordered by segment, QPC, then receipt sequence.</returns>
-    public IReadOnlyList<CaptureStreamEvent> SnapshotByQpc()
+    /// <summary>Allocates the next valid sequence for a coordinator-generated status event.</summary>
+    /// <param name="sourceId">Recipe source whose status is being recorded.</param>
+    /// <returns>Zero for its first event, otherwise one after the last observed sequence.</returns>
+    public long NextSourceSequence(string sourceId)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceId);
         lock (_gate)
         {
-            return [.. _events
-                .OrderBy(captureEvent => captureEvent.ClockSegment)
-                .ThenBy(captureEvent => captureEvent.QpcReceiptTime)
-                .ThenBy(captureEvent => captureEvent.GlobalSequence)];
+            if (!_sources.TryGetValue(sourceId, out SourceState? source) || !source.HasSequence)
+            {
+                return 0;
+            }
+
+            if (source.LastSequence == long.MaxValue)
+            {
+                throw new InvalidDataException("Passive source exhausted its sequence range.");
+            }
+
+            return source.LastSequence + 1;
         }
     }
 
@@ -321,7 +314,7 @@ internal sealed class PassiveCaptureCoordinator
     {
         SourceId = step.SourceId,
         RecipeStepId = step.StepId,
-        SourceSequence = 0,
+        SourceSequence = _timeline.NextSourceSequence(step.SourceId),
         DeviceGeneration = 0,
         Payload = EmptyPayload(),
         Access = EventAccessState.Unavailable,
@@ -331,7 +324,7 @@ internal sealed class PassiveCaptureCoordinator
     {
         SourceId = step.SourceId,
         RecipeStepId = step.StepId,
-        SourceSequence = long.MaxValue,
+        SourceSequence = _timeline.NextSourceSequence(step.SourceId),
         DeviceGeneration = 0,
         Payload = EmptyPayload(),
         TimedOut = true,
@@ -375,127 +368,13 @@ internal enum GuidedOperatorMarkerKind
     OemSettingAfter,
 }
 
-/// <summary>Closed six-face orientations for a guided motion observation.</summary>
-internal enum GuidedMotionFace
-{
-    /// <summary>Display facing upward.</summary>
-    FaceUp,
-
-    /// <summary>Display facing downward.</summary>
-    FaceDown,
-
-    /// <summary>Top edge facing upward.</summary>
-    TopUp,
-
-    /// <summary>Bottom edge facing upward.</summary>
-    BottomUp,
-
-    /// <summary>Left edge facing upward.</summary>
-    LeftUp,
-
-    /// <summary>Right edge facing upward.</summary>
-    RightUp,
-}
-
-/// <summary>Closed axis positions used by guided capture.</summary>
-internal enum GuidedAxisPosition
-{
-    /// <summary>Negative or minimum extent.</summary>
-    Minimum,
-
-    /// <summary>Neutral or center position.</summary>
-    Center,
-
-    /// <summary>Positive or maximum extent.</summary>
-    Maximum,
-}
-
-/// <summary>Creates and validates passive operator-marker observations.</summary>
+/// <summary>Decodes passive operator-marker observations found in imported captures.</summary>
 internal static class GuidedOperatorMarkers
 {
     /// <summary>Stable source ID for guided operator markers.</summary>
     public const string SourceId = "operator.marker";
 
-    /// <summary>Creates one marker payload; it never invokes the OEM utility or hardware.</summary>
-    /// <param name="stepId">Recipe step receiving the marker.</param>
-    /// <param name="actionId">Stable action correlation ID.</param>
-    /// <param name="kind">Closed guided action.</param>
-    /// <param name="label">Bounded operator label such as button or axis name.</param>
-    /// <param name="sourceSequence">Operator-marker sequence.</param>
-    /// <param name="deviceGeneration">Current observed generation.</param>
-    /// <returns>A passive observation ready for the shared timeline.</returns>
-    public static PassiveObservation Create(
-        string stepId,
-        string actionId,
-        GuidedOperatorMarkerKind kind,
-        string label,
-        long sourceSequence,
-        long deviceGeneration)
-    {
-        ValidateToken(stepId, nameof(stepId));
-        ValidateToken(actionId, nameof(actionId));
-        ValidateToken(label, nameof(label));
-        string encoded = string.Join("\t", "v1", kind.ToString(), actionId, label);
-        byte[] bytes = Encoding.UTF8.GetBytes(encoded);
-        return new PassiveObservation
-        {
-            SourceId = SourceId,
-            RecipeStepId = stepId,
-            SourceSequence = sourceSequence,
-            DeviceGeneration = deviceGeneration,
-            Payload = new CapturedPayload
-            {
-                Length = bytes.Length,
-                Disposition = PayloadDisposition.Included,
-                Bytes = bytes,
-                Sha256 = CaptureHashFile.Hash(bytes),
-            },
-        };
-    }
-
-    /// <summary>Creates a marker for one axis at a closed minimum, center, or maximum position.</summary>
-    /// <param name="stepId">Recipe step receiving the marker.</param>
-    /// <param name="actionId">Stable axis-action ID.</param>
-    /// <param name="axisId">Bounded axis name.</param>
-    /// <param name="position">Closed guided position.</param>
-    /// <param name="sourceSequence">Operator-marker sequence.</param>
-    /// <param name="deviceGeneration">Current observed generation.</param>
-    /// <returns>Passive axis marker.</returns>
-    public static PassiveObservation CreateAxis(
-        string stepId,
-        string actionId,
-        string axisId,
-        GuidedAxisPosition position,
-        long sourceSequence,
-        long deviceGeneration) => Create(
-            stepId,
-            actionId,
-            GuidedOperatorMarkerKind.AxisPosition,
-            $"{axisId}:{position}",
-            sourceSequence,
-            deviceGeneration);
-
-    /// <summary>Creates one of the six closed device-orientation markers.</summary>
-    /// <param name="stepId">Recipe step receiving the marker.</param>
-    /// <param name="actionId">Stable motion-action ID.</param>
-    /// <param name="face">One of six physical orientations.</param>
-    /// <param name="sourceSequence">Operator-marker sequence.</param>
-    /// <param name="deviceGeneration">Current observed generation.</param>
-    /// <returns>Passive motion marker.</returns>
-    public static PassiveObservation CreateMotionFace(
-        string stepId,
-        string actionId,
-        GuidedMotionFace face,
-        long sourceSequence,
-        long deviceGeneration) => Create(
-            stepId,
-            actionId,
-            GuidedOperatorMarkerKind.MotionFace,
-            face.ToString(),
-            sourceSequence,
-            deviceGeneration);
-
-    /// <summary>Decodes a marker emitted by <see cref="Create"/>.</summary>
+    /// <summary>Decodes one marker event.</summary>
     /// <param name="captureEvent">Raw event.</param>
     /// <param name="kind">Decoded kind.</param>
     /// <param name="actionId">Decoded correlation ID.</param>
@@ -532,53 +411,6 @@ internal static class GuidedOperatorMarkers
         return true;
     }
 
-    /// <summary>Reports duplicate and unpaired action markers without discarding them.</summary>
-    /// <param name="events">Raw timeline.</param>
-    /// <returns>Deterministic ambiguity descriptions.</returns>
-    public static IReadOnlyList<string> Validate(IReadOnlyList<CaptureStreamEvent> events)
-    {
-        ArgumentNullException.ThrowIfNull(events);
-        var markers = events
-            .Select(captureEvent => TryDecode(captureEvent, out GuidedOperatorMarkerKind kind, out string action, out _)
-                ? new { Event = captureEvent, Kind = kind, Action = action }
-                : null)
-            .Where(marker => marker is not null)
-            .ToArray();
-        List<string> errors = [];
-
-        foreach (var duplicate in markers
-            .GroupBy(marker => (marker!.Action, marker.Kind))
-            .Where(group => group.Count() > 1)
-            .OrderBy(group => group.Key.Action, StringComparer.Ordinal)
-            .ThenBy(group => group.Key.Kind))
-        {
-            errors.Add($"Duplicate {duplicate.Key.Kind} marker for action '{duplicate.Key.Action}'.");
-        }
-
-        foreach (var action in markers.GroupBy(marker => marker!.Action).OrderBy(group => group.Key, StringComparer.Ordinal))
-        {
-            bool press = action.Any(marker => marker!.Kind is GuidedOperatorMarkerKind.ButtonPress);
-            bool release = action.Any(marker => marker!.Kind is GuidedOperatorMarkerKind.ButtonRelease);
-            if (press != release)
-            {
-                errors.Add($"Button action '{action.Key}' requires exactly one press and release marker.");
-            }
-        }
-
-        return errors;
-    }
-
-    private static void ValidateToken(string value, string parameterName)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
-        if (value.Length > CaptureSchema.MaximumIdentifierLength
-            || value.Contains('\t')
-            || value.Contains('\r')
-            || value.Contains('\n'))
-        {
-            throw new ArgumentException("Marker tokens must be bounded single-line values without tabs.", parameterName);
-        }
-    }
 }
 
 /// <summary>Explicit limitations attached to passive Device Lab observations.</summary>

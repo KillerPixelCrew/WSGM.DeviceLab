@@ -723,8 +723,15 @@ internal sealed class LocalPluginPackage : IAsyncDisposable
 
         protected override nint LoadUnmanagedDll(string unmanagedDllName)
         {
-            string path = _resolver.ResolveUnmanagedDllToPath(unmanagedDllName)
-                ?? throw new DllNotFoundException($"Package native dependency '{unmanagedDllName}' was not found.");
+            string? path = _resolver.ResolveUnmanagedDllToPath(unmanagedDllName);
+            if (path is null)
+            {
+                // Zero delegates to the runtime's normal OS-library search. A plugin may import a
+                // Windows DLL without bundling a package copy; only a dependency the package
+                // resolver actually selected needs the package-boundary check below.
+                return 0;
+            }
+
             EnsureLocal(path);
             return NativeLibrary.Load(path);
         }

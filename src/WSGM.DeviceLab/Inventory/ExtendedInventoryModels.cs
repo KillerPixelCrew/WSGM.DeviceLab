@@ -400,7 +400,7 @@ internal sealed record ProviderInventory
     /// <summary>Namespace or host context when published.</summary>
     public string? Context { get; init; }
 
-    /// <summary>Private host process ID when reported.</summary>
+    /// <summary>Provider host process ID when reported.</summary>
     public int? HostProcessId { get; init; }
 
     /// <summary>Shareable session-local host-process token.</summary>

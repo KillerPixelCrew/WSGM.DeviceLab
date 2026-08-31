@@ -104,6 +104,11 @@ internal static class MachineInventoryNormalizer
                 .OrderBy(observation => observation.Generation)
                 .ThenBy(observation => observation.InstanceId, StringComparer.Ordinal)
                 .ToArray(),
+            CollectionIssues = OrEmpty(inventory.CollectionIssues)
+                .OrderBy(issue => issue.Lane, StringComparer.Ordinal)
+                .ThenBy(issue => issue.Error, StringComparer.Ordinal)
+                .Take(InventoryLimits.MaximumEndpointsPerLane)
+                .ToArray(),
         };
     }
 

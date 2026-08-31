@@ -29,6 +29,8 @@ internal sealed class MainWindow : Window
     private readonly IReadOnlyList<TabItem> _ownerTabs;
     private readonly IReadOnlyList<TabItem> _developerTabs;
     private CancellationTokenSource? _operation;
+    private TaskCompletionSource<bool>? _operationFinished;
+    private bool _closeAfterOperation;
     private DeviceLabGuiOperationState _displayState = DeviceLabGuiOperationState.Initial;
     private CaptureExportPlan? _captureExportPlan;
     private string? _reviewedRecipeHash;
@@ -51,6 +53,7 @@ internal sealed class MainWindow : Window
         Height = 800;
         MinWidth = 900;
         MinHeight = 620;
+        Closing += HandleClosing;
 
         _mode = new ComboBox
         {
@@ -573,12 +576,18 @@ internal sealed class MainWindow : Window
         }
 
         CancellationTokenSource current = new();
+        TaskCompletionSource<bool> finished = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         _operation = current;
+        _operationFinished = finished;
         _cancel.IsEnabled = true;
         ApplyDisplayState(_displayState.Started());
         try
         {
-            object? result = await operation(current.Token);
+            // Async workflows can validate packages, load plugins, or enumerate the machine before
+            // their first await. Start every workflow on a worker so that synchronous prefix never
+            // stalls Avalonia's UI thread.
+            object? result = await Task.Run(() => operation(current.Token), current.Token);
             current.Token.ThrowIfCancellationRequested();
             string serialized = JsonSerializer.Serialize(display?.Invoke(result) ?? result, DisplayJson);
             accepted?.Invoke(result);
@@ -599,6 +608,11 @@ internal sealed class MainWindow : Window
             {
                 _operation = null;
             }
+            if (ReferenceEquals(_operationFinished, finished))
+            {
+                _operationFinished = null;
+            }
+            finished.TrySetResult(true);
             _cancel.IsEnabled = false;
         }
     }
@@ -619,10 +633,19 @@ internal sealed class MainWindow : Window
         return message.Length <= maximumCharacters ? message : message[..maximumCharacters];
     }
 
-    protected override void OnClosed(EventArgs e)
+    private async void HandleClosing(object? sender, WindowClosingEventArgs eventArgs)
     {
-        _operation?.Cancel();
-        base.OnClosed(e);
+        if (_closeAfterOperation || _operation is not { } operation
+            || _operationFinished is not { } finished)
+        {
+            return;
+        }
+
+        eventArgs.Cancel = true;
+        operation.Cancel();
+        await finished.Task;
+        _closeAfterOperation = true;
+        Close();
     }
 
     private void ApplyMode()

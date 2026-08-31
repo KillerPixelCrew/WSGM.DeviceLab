@@ -64,6 +64,9 @@ internal enum ReadProbeCrossCheckKind
 
     /// <summary>The independent observation must report the same normalized status.</summary>
     SameStatus,
+
+    /// <summary>The independent observation must be present, but may legitimately change.</summary>
+    Present,
 }
 
 /// <summary>Structural and semantic invariants for one read-probe response.</summary>

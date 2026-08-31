@@ -15,7 +15,7 @@ namespace WSGM.DeviceLab.Packaging;
 internal sealed class DeviceLabPackageSnapshot : IDisposable
 {
     private readonly NoFollowPackageSource _source;
-    private readonly Dictionary<string, DeviceLabPackageFile> _files = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DeviceLabPackageFile> _files = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _canonicalPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly ICollection<PluginPackageValidationIssue> _issues;
     private bool _disposed;

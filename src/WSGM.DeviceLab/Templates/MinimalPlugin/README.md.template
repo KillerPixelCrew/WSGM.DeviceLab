@@ -43,10 +43,10 @@ Use `--action controller`, or use
 `--action capability --capability <id> --value <semantic-value> [--instance <id>]`, for the other
 explicit attended actions.
 
-After validation, close the WSGM shell and DeviceHost. Installation makes this directory trusted
+After validation, close the WSGM shell. Installation makes this directory trusted
 hardware code that may later inherit WSGM's elevation, so inspect the exact files first. Install or
 replace the sole protected plugin slot with the installed WSGM maintenance command (it requests
-elevation and refuses a machine-wide WSGM/Device Lab hardware owner or any running DeviceHost):
+elevation and refuses a machine-wide WSGM/Device Lab hardware owner):
 
 ```powershell
 & "$env:LOCALAPPDATA\WSGM\bin\WSGM.exe" --install-device-plugin <package-directory>
