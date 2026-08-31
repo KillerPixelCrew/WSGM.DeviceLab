@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (without the leading v)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            '${{ github.event.inputs.version }}'
+          } else {
+            '${{ github.ref_name }}' -replace '^v', ''
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version must be MAJOR.MINOR.PATCH, got '$version'."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Test
+        run: dotnet test WSGM.DeviceLab.slnx --configuration Release
+
+      - name: Publish
+        run: ./eng/publish.ps1 -Version ${{ steps.version.outputs.version }}
+        shell: pwsh
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $name = "wsgm-device-${{ steps.version.outputs.version }}-win-x64.zip"
+          Compress-Archive -Path publish/* -DestinationPath $name -CompressionLevel Optimal
+          # WSGM pins this artifact by hash, so the hash is part of the release, not an
+          # afterthought a consumer has to compute by downloading it first.
+          $hash = (Get-FileHash -Path $name -Algorithm SHA256).Hash
+          "name=$name"  >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "SHA-256: $hash" | Tee-Object -FilePath "$name.sha256"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.name }}
+            ${{ steps.package.outputs.name }}.sha256
+          body: |
+            Device Lab ${{ steps.version.outputs.version }}, self-contained win-x64.
+
+            `${{ steps.package.outputs.name }}`
+            SHA-256 `${{ steps.package.outputs.sha256 }}`
+
+            Pin this in a consuming repository by asset URL and hash.

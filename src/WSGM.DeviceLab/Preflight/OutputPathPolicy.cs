@@ -281,10 +281,16 @@ internal static class DeviceLabOutputPathPolicy
         };
 }
 
-/// <summary>Finds the WSGM source root without assuming the process started there.</summary>
+/// <summary>Finds the Device Lab source root without assuming the process started there.</summary>
 internal static class DeviceLabRepositoryLocator
 {
-    /// <summary>Walks upward for the WSGM solution marker.</summary>
+    /// <summary>The solution files that mark a checkout Device Lab may be running from.</summary>
+    /// <remarks>Two markers, because Device Lab runs from two checkouts: its own repository, and a
+    /// WSGM checkout that pins it. Both place the SDK at the same relative path, which is what
+    /// <c>SdkReferenceXml</c> depends on.</remarks>
+    private static readonly string[] SolutionMarkers = ["WSGM.DeviceLab.slnx", "WSGM.slnx"];
+
+    /// <summary>Walks upward for a solution marker.</summary>
     /// <param name="startPath">File or directory path to start from.</param>
     /// <returns>The repository root, or <see langword="null"/> outside a checkout.</returns>
     public static string? Find(string startPath)
@@ -310,9 +316,12 @@ internal static class DeviceLabRepositoryLocator
             : new DirectoryInfo(fullPath);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "WSGM.slnx")))
+            foreach (string marker in SolutionMarkers)
             {
-                return directory.FullName;
+                if (File.Exists(Path.Combine(directory.FullName, marker)))
+                {
+                    return directory.FullName;
+                }
             }
 
             directory = directory.Parent;

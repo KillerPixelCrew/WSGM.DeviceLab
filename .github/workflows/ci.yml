@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          # external/WSGM.Device.Sdk is a submodule. Without this it checks out empty and the
+          # build fails on an unresolvable project path rather than on the missing checkout.
+          submodules: recursive
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build WSGM.DeviceLab.slnx --configuration Release
+
+      - name: Test
+        # Unattended only. Nothing here touches hardware, and `test hardware` is not reachable
+        # from a test: it requires an explicit action, a named state directory and a real device.
+        run: dotnet test WSGM.DeviceLab.slnx --configuration Release --no-build
