@@ -20,7 +20,16 @@ internal sealed class CancellableSynchronousWorker
         Task<T> worker;
         try
         {
-            worker = Task.Run(() => operation(cancellationToken));
+            // Callers already invoke this synchronous adapter from background work. Scheduling the
+            // provider onto the same thread pool and then synchronously waiting for it can starve
+            // a cold or CPU-constrained process before the provider even starts. A dedicated
+            // worker also gives an uncooperative native provider somewhere bounded to finish after
+            // caller cancellation without occupying another pool thread.
+            worker = Task.Factory.StartNew(
+                () => operation(cancellationToken),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
+                TaskScheduler.Default);
         }
         catch
         {
