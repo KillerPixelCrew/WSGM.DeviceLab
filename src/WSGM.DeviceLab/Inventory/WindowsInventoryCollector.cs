@@ -24,6 +24,9 @@ namespace WSGM.DeviceLab.Inventory;
 /// </remarks>
 internal static partial class WindowsInventoryCollector
 {
+    private static readonly TimeSpan WmiOperationTimeout = TimeSpan.FromSeconds(5);
+    private static readonly CancellableSynchronousWorker InventoryWorker = new();
+
     /// <summary>Schema version emitted by this collector.</summary>
     public const int CurrentSchemaVersion = 1;
 
@@ -42,6 +45,22 @@ internal static partial class WindowsInventoryCollector
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        (string Namespace, string ClassName)[] classes =
+            [.. wmiClassesToProbe ?? []];
+        // System.Management only exposes synchronous enumeration here. Keep it on one bounded
+        // background worker so GUI cancellation is immediate; each WMI operation also has a
+        // finite provider timeout, and the gate prevents cancelled calls from accumulating.
+        return InventoryWorker.Run(
+            token => CollectCore(capturedAt, classes, token),
+            cancellationToken);
+    }
+
+    private static MachineInventory CollectCore(
+        DateTimeOffset capturedAt,
+        IReadOnlyList<(string Namespace, string ClassName)> wmiClassesToProbe,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         List<InventoryCollectionIssue> collectionIssues = [];
         MachineInventory collected = new()
         {
@@ -52,7 +71,7 @@ internal static partial class WindowsInventoryCollector
                 () => CollectGraphicsAdapters(collectionIssues),
                 cancellationToken),
             UsbInterfaces = CollectUsbInterfaces(cancellationToken, collectionIssues),
-            WmiClasses = CollectWmiClasses(wmiClassesToProbe ?? [], cancellationToken),
+            WmiClasses = CollectWmiClasses(wmiClassesToProbe, cancellationToken),
             SerialEndpoints = CollectSection(CollectSerialEndpoints, cancellationToken),
             Sensors = CollectSection(CollectSensors, cancellationToken),
             InputBackends = CollectSection(CollectInputBackends, cancellationToken),
@@ -166,7 +185,7 @@ internal static partial class WindowsInventoryCollector
 
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT DeviceID, PNPClass, Status, HardwareID FROM Win32_PnPEntity "
                     + "WHERE DeviceID LIKE 'USB%' OR DeviceID LIKE 'HID%'");
@@ -243,7 +262,9 @@ internal static partial class WindowsInventoryCollector
         try
         {
             using ManagementClass definition = new(
-                new ManagementScope(ns), new ManagementPath(className), null);
+                new ManagementScope(ns),
+                new ManagementPath(className),
+                new ObjectGetOptions { Timeout = WmiOperationTimeout });
             definition.Get();
 
             List<string> methods = [];
@@ -257,7 +278,9 @@ internal static partial class WindowsInventoryCollector
             int? instanceCount = null;
             try
             {
-                using ManagementObjectSearcher searcher = new(ns, $"SELECT * FROM {className}");
+                using ManagementObjectSearcher searcher = CreateSearcher(
+                    ns,
+                    $"SELECT * FROM {className}");
                 int count = 0;
                 foreach (ManagementBaseObject instance in searcher.Get())
                 {
@@ -320,7 +343,7 @@ internal static partial class WindowsInventoryCollector
     {
         try
         {
-            using ManagementObjectSearcher searcher = new(ns, query);
+            using ManagementObjectSearcher searcher = CreateSearcher(ns, query);
             foreach (ManagementBaseObject item in searcher.Get())
             {
                 return (ManagementObject)item;
@@ -336,6 +359,14 @@ internal static partial class WindowsInventoryCollector
         }
 
         return null;
+    }
+
+    private static ManagementObjectSearcher CreateSearcher(string ns, string query)
+    {
+        var searcher = new ManagementObjectSearcher(ns, query);
+        searcher.Options.Timeout = WmiOperationTimeout;
+        searcher.Options.ReturnImmediately = false;
+        return searcher;
     }
 
     private static string? Text(ManagementBaseObject? source, string property)

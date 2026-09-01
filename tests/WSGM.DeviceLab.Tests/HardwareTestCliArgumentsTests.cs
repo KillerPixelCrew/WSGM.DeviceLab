@@ -60,6 +60,20 @@ public sealed class HardwareTestCliArgumentsTests
         Assert.Equal(expectedKind, parsed.Action.Kind.ToString());
     }
 
+    [Fact]
+    public void FixedAction_AcceptsAnExactControllerInstance()
+    {
+        string[] arguments = [.. ValidFixedAction(), "--instance", "left"];
+
+        bool accepted = HardwareTestCliArguments.TryParse(
+            arguments,
+            out HardwareTestCliArguments? parsed,
+            out string error);
+
+        Assert.True(accepted, error);
+        Assert.Equal("left", parsed!.Action.InstanceId);
+    }
+
     [Theory]
     [MemberData(nameof(DuplicateOptionCases))]
     public void DuplicateOption_IsRejected(string[] arguments)
@@ -98,7 +112,6 @@ public sealed class HardwareTestCliArgumentsTests
 
     [Theory]
     [InlineData("--capability", "lighting.zone")]
-    [InlineData("--instance", "left")]
     [InlineData("--value", "true")]
     public void FixedAction_WithCapabilityOnlyOption_IsRejected(string option, string value)
     {

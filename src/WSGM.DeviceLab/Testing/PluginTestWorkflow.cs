@@ -148,7 +148,16 @@ internal static class PluginTestWorkflow
     /// <param name="identity">Current normalized machine identity.</param>
     /// <param name="cancellationToken">Cancels the local test.</param>
     /// <returns>Detection and load result.</returns>
-    public static async Task<PluginTestReport> TestDetectionAsync(
+    public static Task<PluginTestReport> TestDetectionAsync(
+        string packageDirectory,
+        DeviceIdentitySnapshot identity,
+        CancellationToken cancellationToken) => PluginTestWorkerSupervisor.TestDetectionAsync(
+            packageDirectory,
+            identity,
+            cancellationToken);
+
+    /// <summary>Worker-only detector implementation; community code must not call this in the UI process.</summary>
+    internal static async Task<PluginTestReport> TestDetectionInProcessAsync(
         string packageDirectory,
         DeviceIdentitySnapshot identity,
         CancellationToken cancellationToken)
@@ -189,20 +198,13 @@ internal static class PluginTestWorkflow
         AttendedPluginActionRequest action,
         bool confirmed,
         DeviceLabPathBoundaries boundaries,
-        CancellationToken cancellationToken) => RunAttendedAsync(
+        CancellationToken cancellationToken) => PluginTestWorkerSupervisor.RunAttendedAsync(
             packageDirectory,
             identity,
             stateDirectory,
             action,
             confirmed,
             boundaries,
-            new AttendedPluginSafetyEnvironment
-            {
-                ReserveOwner = DeviceLabOwnerInspector.Reserve,
-                IsElevated = IsElevated(),
-                IsUserInteractive = Environment.UserInteractive,
-                IsContinuousIntegration = IsContinuousIntegration(),
-            },
             cancellationToken);
 
     internal static async Task<PluginTestReport> RunAttendedAsync(

@@ -183,6 +183,49 @@ public sealed class DeviceLabScaffoldingTests
     }
 
     [Fact]
+    public void Scaffold_MultipleExactUsbEndpointsRequireAnExplicitInstance()
+    {
+        using TemporaryDirectory temporary = new();
+        SanitizedCaptureBundle original = Capture();
+        SanitizedCaptureBundle multiple = original with
+        {
+            Inventory = original.Inventory with
+            {
+                UsbInterfaces =
+                [
+                    original.Inventory.UsbInterfaces[0] with { InstanceId = "usb-left" },
+                    original.Inventory.UsbInterfaces[0] with { InstanceId = "usb-right" },
+                ],
+            },
+        };
+        string capturePath = temporary.GetPath("multiple.wsgmcap");
+        using (FileStream capture = new(capturePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            CaptureBundleWriter.Write(capture, multiple);
+        }
+        DeviceLabPathBoundaries boundaries = new()
+        {
+            LiveDataDirectory = temporary.GetPath("never-live-wsgm"),
+            BroadHomeDirectories = [],
+        };
+
+        InvalidDataException ambiguous = Assert.Throws<InvalidDataException>(() =>
+            ScaffoldFromCaptureWorkflow.Run(
+                capturePath,
+                temporary.GetPath("ambiguous"),
+                boundaries));
+        PluginScaffoldResult selected = ScaffoldFromCaptureWorkflow.Run(
+            capturePath,
+            temporary.GetPath("selected"),
+            boundaries,
+            usbInstanceId: "usb-right");
+
+        Assert.Contains("Select one exact instance ID", ambiguous.Message, StringComparison.Ordinal);
+        Assert.Equal("CAFE", selected.Identity.UsbVendorId);
+        Assert.True(Directory.Exists(selected.OutputDirectory));
+    }
+
+    [Fact]
     public void MinimalTemplate_DemonstratesPartialStateCanonicalIoCancellationDiagnosticsAndRestore()
     {
         Assembly assembly = typeof(ScaffoldFromCaptureWorkflow).Assembly;

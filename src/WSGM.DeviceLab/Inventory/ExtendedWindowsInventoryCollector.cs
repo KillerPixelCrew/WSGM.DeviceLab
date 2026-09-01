@@ -41,7 +41,7 @@ internal static partial class WindowsInventoryCollector
         List<GraphicsAdapterInventory> adapters = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT PNPDeviceID, Name, DriverVersion FROM Win32_VideoController");
             foreach (ManagementBaseObject item in searcher.Get())
@@ -95,7 +95,7 @@ internal static partial class WindowsInventoryCollector
         List<SerialEndpointInventory> endpoints = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT DeviceID, PNPDeviceID, Name, Description, BaudRate, ByteSize, Parity, StopBits "
                     + "FROM Win32_SerialPort");
@@ -154,7 +154,7 @@ internal static partial class WindowsInventoryCollector
 
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT DeviceID, Name, Manufacturer, Status FROM Win32_PnPEntity "
                     + "WHERE PNPClass = 'Ports'");
@@ -222,7 +222,7 @@ internal static partial class WindowsInventoryCollector
         List<SensorEndpointInventory> sensors = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT DeviceID, Name, PNPClass, Status FROM Win32_PnPEntity "
                     + "WHERE PNPClass = 'Sensor' OR PNPClass = 'HIDClass'");
@@ -501,7 +501,7 @@ internal static partial class WindowsInventoryCollector
         List<InputEndpointInventory> endpoints = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT DeviceID, Name, Service, Status FROM Win32_PnPEntity WHERE PNPClass = 'HIDClass'");
             foreach (ManagementBaseObject item in searcher.Get())
@@ -805,7 +805,7 @@ internal static partial class WindowsInventoryCollector
         Dictionary<int, string?> lines = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT ProcessId, Name, CommandLine FROM Win32_Process");
             foreach (ManagementBaseObject item in searcher.Get())
@@ -833,7 +833,7 @@ internal static partial class WindowsInventoryCollector
         List<ServiceInventory> services = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT Name, DisplayName, State, PathName, ProcessId FROM Win32_Service");
             foreach (ManagementBaseObject item in searcher.Get())
@@ -887,7 +887,7 @@ internal static partial class WindowsInventoryCollector
         List<ScheduledTaskInventory> tasks = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\Microsoft\\Windows\\TaskScheduler",
                 "SELECT TaskName, TaskPath, State, Enabled FROM MSFT_ScheduledTask");
             foreach (ManagementBaseObject item in searcher.Get())
@@ -985,7 +985,7 @@ internal static partial class WindowsInventoryCollector
         List<ProviderInventory> providers = [];
         try
         {
-            using ManagementObjectSearcher searcher = new(
+            using ManagementObjectSearcher searcher = CreateSearcher(
                 "root\\CIMV2",
                 "SELECT Namespace, Provider, HostProcessIdentifier FROM MSFT_Providers");
             foreach (ManagementBaseObject item in searcher.Get())

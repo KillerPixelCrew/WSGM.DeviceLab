@@ -22,6 +22,18 @@ public sealed class CaptureBundleReaderTests
     }
 
     [Fact]
+    public void StreamingWriterRemainsByteForByteDeterministic()
+    {
+        using MemoryStream first = new();
+        using MemoryStream second = new();
+
+        CaptureBundleWriter.Write(first, Bundle());
+        CaptureBundleWriter.Write(second, Bundle());
+
+        Assert.Equal(first.ToArray(), second.ToArray());
+    }
+
+    [Fact]
     public void NonSeekableInputIsRejectedWithoutReading()
     {
         using NonSeekableReadStream source = new([]);
@@ -105,6 +117,35 @@ public sealed class CaptureBundleReaderTests
         Assert.Equal(
             CaptureBundleReadFailure.MalformedContent,
             CaptureBundleReader.Read(archive).Failure);
+    }
+
+    [Fact]
+    public void PrivacyPreviewRepresentsSanitizedRootsAndEveryBlobWithoutDumpingFullBytes()
+    {
+        byte[] bytes = Enumerable.Range(0, 512).Select(value => (byte)value).ToArray();
+        CaptureBlobDescriptor descriptor = new()
+        {
+            BlobId = "blob-1",
+            Path = "blobs/blob-1.bin",
+            MediaType = "application/octet-stream",
+            Length = bytes.Length,
+            Sha256 = CaptureHashFile.Hash(bytes),
+        };
+        SanitizedCaptureBundle original = Bundle();
+        SanitizedCaptureBundle bundle = original with
+        {
+            Manifest = original.Manifest with { Blobs = [descriptor] },
+            Blobs = [new CaptureBlobFile { Descriptor = descriptor, Bytes = bytes }],
+        };
+
+        CapturePrivacyPreview preview = CapturePrivacyPreview.Create(bundle);
+
+        Assert.Same(bundle.Inventory, preview.Inventory);
+        CaptureBlobPreview blob = Assert.Single(preview.Blobs);
+        Assert.Equal(bytes.Length, blob.ByteLength);
+        Assert.Equal(descriptor.Sha256, blob.Sha256);
+        Assert.True(blob.PrefixTruncated);
+        Assert.True(Convert.FromBase64String(blob.Base64Prefix).Length < bytes.Length);
     }
 
     private static List<(string Path, string Content)> CanonicalJsonEntries() =>

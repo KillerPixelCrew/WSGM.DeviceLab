@@ -198,6 +198,93 @@ public sealed class AttendedPluginActionTests
         Assert.True(report.RestorationVerified);
     }
 
+    [Fact]
+    public async Task ControllerAction_RefusesAmbiguousRoleUntilAnExactInstanceIsSelected()
+    {
+        TestPluginHostAdapter host = await RoleHostAsync(
+            CapabilityRole.HapticSink,
+            "left",
+            "right");
+        var plugin = new ActionTestPlugin(host);
+
+        AttendedPluginActionReport ambiguous = await AttendedPluginActionRunner.RunAsync(
+            plugin,
+            host,
+            new AttendedPluginActionRequest { Kind = AttendedPluginActionKind.HapticPulse },
+            CancellationToken.None);
+        AttendedPluginActionReport selected = await AttendedPluginActionRunner.RunAsync(
+            plugin,
+            host,
+            new AttendedPluginActionRequest
+            {
+                Kind = AttendedPluginActionKind.HapticPulse,
+                InstanceId = "right",
+            },
+            CancellationToken.None);
+
+        Assert.False(ambiguous.Passed);
+        Assert.Contains("multiple", ambiguous.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.True(selected.Passed, selected.Error);
+        Assert.Equal("right", selected.InstanceId);
+    }
+
+    [Fact]
+    public async Task CapabilityValue_TextIsValidatedAppliedAndRestored()
+    {
+        var host = new TestPluginHostAdapter(cycleGeneration: 7);
+        var descriptor = new CapabilityDescriptor
+        {
+            CapabilityId = "generic.label",
+            Role = CapabilityRole.GenericText,
+            SectionId = "general",
+            ValueKind = CapabilityValueKind.Text,
+            Display = Display("Label"),
+            SupportsRead = true,
+            SupportsWrite = true,
+            MaximumLength = 16,
+            Persistence = CapabilityPersistence.Volatile,
+        };
+        await host.PublishDescriptorsAsync(
+            new CapabilityDescriptorSet
+            {
+                Generation = 4,
+                CycleGeneration = 7,
+                Descriptors = [descriptor],
+            },
+            CancellationToken.None);
+        await host.PublishCapabilityStateAsync(
+            new CapabilityState
+            {
+                CapabilityId = descriptor.CapabilityId,
+                Available = true,
+                ObservedValue = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Text,
+                    TextValue = "Dock",
+                },
+                Quality = HardwareStateQuality.Verified,
+                DescriptorGeneration = 4,
+                CycleGeneration = 7,
+            },
+            CancellationToken.None);
+        var plugin = new ActionTestPlugin(host);
+
+        AttendedPluginActionReport report = await AttendedPluginActionRunner.RunAsync(
+            plugin,
+            host,
+            new AttendedPluginActionRequest
+            {
+                Kind = AttendedPluginActionKind.CapabilityValue,
+                CapabilityId = descriptor.CapabilityId,
+                ValueText = "Desk",
+            },
+            CancellationToken.None);
+
+        Assert.True(report.Passed, report.Error);
+        Assert.Equal("Desk", report.Apply!.ReadbackValue!.TextValue);
+        Assert.Equal("Dock", report.Restore!.ReadbackValue!.TextValue);
+    }
+
     private static AttendedPluginActionRequest CapabilityRequest(string value) => new()
     {
         Kind = AttendedPluginActionKind.CapabilityValue,
@@ -246,20 +333,26 @@ public sealed class AttendedPluginActionTests
         return host;
     }
 
-    private static async Task<TestPluginHostAdapter> RoleHostAsync(CapabilityRole role)
+    private static async Task<TestPluginHostAdapter> RoleHostAsync(
+        CapabilityRole role,
+        params string?[] instanceIds)
     {
         var host = new TestPluginHostAdapter(cycleGeneration: 7);
         string capabilityId = role is CapabilityRole.HapticSink ? "controller.haptic" : "controller.source";
+        if (instanceIds.Length == 0)
+        {
+            instanceIds = [null];
+        }
         await host.PublishDescriptorsAsync(
             new CapabilityDescriptorSet
             {
                 Generation = 4,
                 CycleGeneration = 7,
-                Descriptors =
-                [
+                Descriptors = [.. instanceIds.Select(instanceId =>
                     new CapabilityDescriptor
                     {
                         CapabilityId = capabilityId,
+                        InstanceId = instanceId,
                         Role = role,
                         ValueKind = role is CapabilityRole.HapticSink
                             ? CapabilityValueKind.None
@@ -276,8 +369,7 @@ public sealed class AttendedPluginActionTests
                             ]
                             : [],
                         Persistence = CapabilityPersistence.Volatile,
-                    },
-                ],
+                    })],
             },
             CancellationToken.None);
         CapabilityDescriptor descriptor = host.DescriptorSets[^1].Descriptors[0];
@@ -341,6 +433,7 @@ public sealed class AttendedPluginActionTests
         long generation) => new()
         {
             CapabilityId = descriptor.CapabilityId,
+            InstanceId = descriptor.InstanceId,
             Available = available,
             ObservedValue = RoleValue(descriptor, available),
             Quality = HardwareStateQuality.Verified,

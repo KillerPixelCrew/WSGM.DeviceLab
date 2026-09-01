@@ -336,15 +336,18 @@ internal sealed class DeviceLabApplication(string? repositoryRoot, string device
     /// <param name="capturePath">Shareable capture.</param>
     /// <param name="outputDirectory">New scaffold directory.</param>
     /// <param name="cancellationToken">Cancels validation or atomic scaffold publication.</param>
+    /// <param name="usbInstanceId">Exact endpoint selection when the capture contains more than one candidate.</param>
     /// <returns>Copied template files and identity.</returns>
     public PluginScaffoldResult Scaffold(
         string capturePath,
         string outputDirectory,
-        CancellationToken cancellationToken = default) => ScaffoldFromCaptureWorkflow.Run(
+        CancellationToken cancellationToken = default,
+        string? usbInstanceId = null) => ScaffoldFromCaptureWorkflow.Run(
             capturePath,
             outputDirectory,
             Boundaries(),
-            cancellationToken);
+            cancellationToken,
+            usbInstanceId);
 
     /// <summary>Runs the built-in hardware-free synthetic plugin fixture.</summary>
     /// <param name="cancellationToken">Cancels the fixture.</param>

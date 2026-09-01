@@ -30,7 +30,8 @@ wsgm-device compare    before.wsgmcap after.wsgmcap
 wsgm-device correlate  capture.wsgmcap --action <id> --sources <id,id>
 
 # 3. Turn a capture into a buildable plugin.
-wsgm-device scaffold --from capture.wsgmcap --out-dir my-plugin
+wsgm-device scaffold --from capture.wsgmcap --out-dir my-plugin `
+    --usb-instance <exact-instance-id> # required only when several exact USB endpoints are present
 
 # 4. Prove it, offline first.
 wsgm-device validate my-plugin
@@ -53,6 +54,13 @@ The split is enforced, not advisory.
   the entry assembly is a managed x64 image, all statically.
 - **`test hardware`** writes to the device, so it demands an explicit action, a state directory you
   named, and your presence. It exists because a capability write is only proven on real hardware.
+  Detection and the entire attended lifecycle run in an authenticated disposable worker process;
+  Device Lab kills its full process tree at the hard deadline and keeps the production owner slot
+  reserved when cleanup was not verified.
+
+Capture export displays a bounded projection of the actual sanitized bundle before confirmation:
+the root documents are shown, every stream/analysis/blob is represented by exact counts and hashes,
+and large content is sampled instead of silently omitted from the privacy review.
 
 Output paths are checked before anything is written: a broad home directory, a repository root, or
 an existing reparse point is refused rather than written into.

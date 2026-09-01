@@ -632,6 +632,7 @@ internal static class CaptureBundleWriter
 {
     private static readonly DateTimeOffset DeterministicTimestamp =
         new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly byte[] Newline = [(byte)'\n'];
 
     /// <summary>
     /// Writes one validated <c>.wsgmcap</c> archive and leaves the destination stream open.
@@ -665,33 +666,48 @@ internal static class CaptureBundleWriter
             throw new ArgumentException("Capture destination must be writable and seekable.", nameof(destination));
         }
 
-        SortedDictionary<string, byte[]> entries = new(StringComparer.Ordinal)
-        {
-            [CaptureBundleLayout.ManifestPath] = JsonFile(
-                bundle.Manifest,
-                DeviceLabJsonContext.Default.ShareableCaptureManifest),
-            [CaptureBundleLayout.RecipePath] = JsonFile(
-                bundle.Recipe,
-                DeviceLabJsonContext.Default.ObserveOnlyRecipe),
-            [CaptureBundleLayout.InventoryPath] = JsonFile(
-                bundle.Inventory,
-                DeviceLabJsonContext.Default.MachineInventory),
-            [CaptureBundleLayout.RedactionPath] = JsonFile(
-                bundle.Redaction,
-                DeviceLabJsonContext.Default.CaptureRedactionManifest),
-        };
+        SortedDictionary<string, Action<Stream, IncrementalHash, CancellationToken>> entries =
+            new(StringComparer.Ordinal)
+            {
+                [CaptureBundleLayout.ManifestPath] = (output, hash, token) => WriteJsonFile(
+                    output,
+                    hash,
+                    bundle.Manifest,
+                    DeviceLabJsonContext.Default.ShareableCaptureManifest,
+                    token),
+                [CaptureBundleLayout.RecipePath] = (output, hash, token) => WriteJsonFile(
+                    output,
+                    hash,
+                    bundle.Recipe,
+                    DeviceLabJsonContext.Default.ObserveOnlyRecipe,
+                    token),
+                [CaptureBundleLayout.InventoryPath] = (output, hash, token) => WriteJsonFile(
+                    output,
+                    hash,
+                    bundle.Inventory,
+                    DeviceLabJsonContext.Default.MachineInventory,
+                    token),
+                [CaptureBundleLayout.RedactionPath] = (output, hash, token) => WriteJsonFile(
+                    output,
+                    hash,
+                    bundle.Redaction,
+                    DeviceLabJsonContext.Default.CaptureRedactionManifest,
+                    token),
+            };
 
         foreach (CaptureStreamFile stream in bundle.Streams)
         {
             cancellationToken.ThrowIfCancellationRequested();
             CaptureStreamDescriptor descriptor = bundle.Manifest.Streams.Single(item =>
                 string.Equals(item.SourceId, stream.SourceId, StringComparison.Ordinal));
-            entries[descriptor.Path] = Ndjson(
+            entries[descriptor.Path] = (output, hash, token) => WriteNdjson(
+                output,
+                hash,
                 stream.Events,
                 captureEvent => JsonSerializer.SerializeToUtf8Bytes(
                     captureEvent,
                     DeviceLabCompactJson.CaptureStreamEvent),
-                cancellationToken);
+                token);
         }
 
         foreach (CaptureAnalysisFile analysis in bundle.Analysis)
@@ -699,74 +715,100 @@ internal static class CaptureBundleWriter
             cancellationToken.ThrowIfCancellationRequested();
             CaptureAnalysisDescriptor descriptor = bundle.Manifest.Analysis.Single(item =>
                 string.Equals(item.AnalyzerId, analysis.AnalyzerId, StringComparison.Ordinal));
-            entries[descriptor.Path] = Ndjson(
+            entries[descriptor.Path] = (output, hash, token) => WriteNdjson(
+                output,
+                hash,
                 analysis.Results,
                 result => JsonSerializer.SerializeToUtf8Bytes(
                     result,
                     DeviceLabCompactJson.CaptureAnalysisResult),
-                cancellationToken);
+                token);
         }
 
         foreach (CaptureBlobFile blob in bundle.Blobs)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            entries[blob.Descriptor.Path] = blob.Bytes;
+            entries[blob.Descriptor.Path] = (output, hash, token) => WriteBytes(
+                output,
+                hash,
+                blob.Bytes,
+                token);
         }
-
-        List<CaptureHashEntry> hashes = [];
-        foreach ((string path, byte[] content) in entries)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            hashes.Add(new CaptureHashEntry(path, CaptureHashFile.Hash(content)));
-        }
-        entries[CaptureBundleLayout.HashesPath] = Encoding.UTF8.GetBytes(CaptureHashFile.Serialize(hashes));
 
         cancellationToken.ThrowIfCancellationRequested();
         destination.Position = 0;
         destination.SetLength(0);
 
         using ZipArchive archive = new(destination, ZipArchiveMode.Create, leaveOpen: true, Encoding.UTF8);
-        foreach ((string path, byte[] content) in entries)
+        List<CaptureHashEntry> hashes = [];
+        foreach ((string path, Action<Stream, IncrementalHash, CancellationToken> write) in entries)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ZipArchiveEntry entry = archive.CreateEntry(path, CompressionLevel.NoCompression);
             entry.LastWriteTime = DeterministicTimestamp;
             entry.ExternalAttributes = 0;
             using Stream output = entry.Open();
-            int offset = 0;
-            while (offset < content.Length)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                int length = Math.Min(64 * 1024, content.Length - offset);
-                output.Write(content, offset, length);
-                offset += length;
-            }
+            using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            write(output, hash, cancellationToken);
+            hashes.Add(new CaptureHashEntry(
+                path,
+                Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()));
         }
+
+        byte[] hashFile = Encoding.UTF8.GetBytes(CaptureHashFile.Serialize(hashes));
+        ZipArchiveEntry hashesEntry = archive.CreateEntry(
+            CaptureBundleLayout.HashesPath,
+            CompressionLevel.NoCompression);
+        hashesEntry.LastWriteTime = DeterministicTimestamp;
+        hashesEntry.ExternalAttributes = 0;
+        using Stream hashesOutput = hashesEntry.Open();
+        WriteBytes(hashesOutput, hash: null, hashFile, cancellationToken);
     }
 
-    private static byte[] JsonFile<T>(T value, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
+    private static void WriteJsonFile<T>(
+        Stream output,
+        IncrementalHash hash,
+        T value,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo,
+        CancellationToken cancellationToken)
     {
         byte[] json = JsonSerializer.SerializeToUtf8Bytes(value, typeInfo);
-        byte[] withNewline = new byte[json.Length + 1];
-        json.CopyTo(withNewline, 0);
-        withNewline[^1] = (byte)'\n';
-        return withNewline;
+        WriteBytes(output, hash, json, cancellationToken);
+        WriteBytes(output, hash, Newline, cancellationToken);
     }
 
-    private static byte[] Ndjson<T>(
+    private static void WriteNdjson<T>(
+        Stream output,
+        IncrementalHash hash,
         IReadOnlyList<T> values,
         Func<T, byte[]> serialize,
         CancellationToken cancellationToken)
     {
-        using MemoryStream output = new();
         foreach (T value in values)
         {
             cancellationToken.ThrowIfCancellationRequested();
             byte[] json = serialize(value);
-            output.Write(json);
-            output.WriteByte((byte)'\n');
+            WriteBytes(output, hash, json, cancellationToken);
+            WriteBytes(output, hash, Newline, cancellationToken);
         }
+    }
 
-        return output.ToArray();
+    private static void WriteBytes(
+        Stream output,
+        IncrementalHash? hash,
+        ReadOnlySpan<byte> content,
+        CancellationToken cancellationToken)
+    {
+        const int MaximumChunkBytes = 64 * 1024;
+        int offset = 0;
+        while (offset < content.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int length = Math.Min(MaximumChunkBytes, content.Length - offset);
+            ReadOnlySpan<byte> chunk = content.Slice(offset, length);
+            hash?.AppendData(chunk);
+            output.Write(chunk);
+            offset += length;
+        }
     }
 }

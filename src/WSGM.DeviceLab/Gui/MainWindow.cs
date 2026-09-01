@@ -11,6 +11,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using WSGM.DeviceLab.Application;
 using WSGM.DeviceLab.Capture;
 using WSGM.DeviceLab.Preflight;
@@ -20,6 +21,10 @@ namespace WSGM.DeviceLab.Gui;
 
 internal sealed class MainWindow : Window
 {
+    private const int MaximumRecentPathsBytes = 64 * 1024;
+    private const int MaximumRememberedPathCharacters = 4096;
+    private const int MaximumRecentPathCount = 32;
+
     private readonly DeviceLabApplication _application;
     private readonly ComboBox _mode;
     private readonly TabControl _tabs;
@@ -34,6 +39,7 @@ internal sealed class MainWindow : Window
     private DeviceLabGuiOperationState _displayState = DeviceLabGuiOperationState.Initial;
     private CaptureExportPlan? _captureExportPlan;
     private string? _reviewedRecipeHash;
+    private readonly Dictionary<string, string> _recentPaths = LoadRecentPaths();
 
     private static readonly JsonSerializerOptions DisplayJson = new()
     {
@@ -140,7 +146,7 @@ internal sealed class MainWindow : Window
 
     private TabItem BuildSafetyTab()
     {
-        TextBox output = PathInput(DefaultOutputDirectory());
+        TextBox output = PathInput("inventory-output", PathSelectionKind.Folder, DefaultOutputDirectory());
         CheckBox shareable = new()
         {
             Content = "Create a shareable inventory (redact unique identifiers)",
@@ -174,10 +180,10 @@ internal sealed class MainWindow : Window
 
     private TabItem BuildCandidatesTab()
     {
-        TextBox inventoryPath = PathInput();
+        TextBox inventoryPath = PathInput("inventory-file", PathSelectionKind.OpenFile);
         TextBox deviceId = new() { PlaceholderText = "Optional exact logical device ID" };
         TextBox probeId = new() { PlaceholderText = "Reviewed probe ID from candidate output" };
-        TextBox probeOutput = PathInput(DefaultOutputDirectory());
+        TextBox probeOutput = PathInput("probe-output", PathSelectionKind.Folder, DefaultOutputDirectory());
         Button assess = new() { Content = "Compare candidates and read probes" };
         assess.Click += async (_, _) =>
         {
@@ -212,8 +218,8 @@ internal sealed class MainWindow : Window
 
     private TabItem BuildCaptureTab()
     {
-        TextBox recipe = PathInput();
-        TextBox output = PathInput(DefaultOutputDirectory());
+        TextBox recipe = PathInput("capture-recipe", PathSelectionKind.OpenFile);
+        TextBox output = PathInput("capture-output", PathSelectionKind.Folder, DefaultOutputDirectory());
         CheckBox scope = new()
         {
             Content = "I reviewed the observation scope; unknown observers remain unavailable",
@@ -221,7 +227,7 @@ internal sealed class MainWindow : Window
         };
         CheckBox exportReview = new()
         {
-            Content = "I reviewed the actual redaction/quarantine preview below",
+            Content = "I reviewed the bounded preview of every sanitized shareable-content lane below",
             IsEnabled = false,
         };
         Button review = new() { Content = "Review exact recipe scope" };
@@ -279,7 +285,7 @@ internal sealed class MainWindow : Window
                         prepared.ExportPlan.PrivateWorkingDirectory,
                         prepared.ExportPlan.ShareableOutputPath,
                         prepared.ExportPlan.Prompts,
-                        prepared.ExportPlan.Redaction,
+                        privacyPreview = CapturePrivacyPreview.Create(prepared.ExportPlan.Bundle),
                         prepared.ExportPlan.Limitations,
                         shareableWritten = false,
                     };
@@ -323,8 +329,8 @@ internal sealed class MainWindow : Window
 
     private TabItem BuildWorkbenchTab()
     {
-        TextBox left = PathInput();
-        TextBox right = PathInput();
+        TextBox left = PathInput("capture-a", PathSelectionKind.OpenFile);
+        TextBox right = PathInput("capture-b", PathSelectionKind.OpenFile);
         TextBox action = new() { PlaceholderText = "Operator action ID" };
         TextBox sources = new() { PlaceholderText = "Comma-separated source IDs" };
         Button inspect = new() { Content = "Inspect capture A" };
@@ -364,8 +370,15 @@ internal sealed class MainWindow : Window
 
     private TabItem BuildScaffoldTab()
     {
-        TextBox capture = PathInput();
-        TextBox output = PathInput();
+        TextBox capture = PathInput("scaffold-capture", PathSelectionKind.OpenFile);
+        TextBox output = PathInput(
+            "scaffold-output",
+            PathSelectionKind.NewFolder,
+            suggestedName: "new-device-plugin");
+        TextBox usbInstance = new()
+        {
+            PlaceholderText = "Required when the capture contains multiple exact USB endpoints",
+        };
         TextBox fixtureId = new() { PlaceholderText = "Stable fixture ID" };
         Button scaffold = new() { Content = "Copy minimal plugin template" };
         scaffold.Click += async (_, _) =>
@@ -373,7 +386,11 @@ internal sealed class MainWindow : Window
             string capturePath = capture.Text!;
             string outputPath = output.Text!;
             await RunAsync(token => Task.Run<object?>(
-                () => _application.Scaffold(capturePath, outputPath, token), token));
+                () => _application.Scaffold(
+                    capturePath,
+                    outputPath,
+                    token,
+                    string.IsNullOrWhiteSpace(usbInstance.Text) ? null : usbInstance.Text), token));
         };
         Button fixture = new() { Content = "Extract simulator-only fixture" };
         fixture.Click += async (_, _) =>
@@ -389,16 +406,20 @@ internal sealed class MainWindow : Window
             "Device Lab copies the checked-in minimal template and replaces only exact captured identity tokens.",
             Labeled("Verified capture", capture),
             Labeled("New output directory", output),
+            Labeled("USB instance ID", usbInstance),
             Labeled("Fixture ID", fixtureId),
             Buttons(scaffold, fixture));
     }
 
     private TabItem BuildPackageTab()
     {
-        TextBox packageDirectory = PathInput();
-        TextBox packageOutput = PathInput();
-        TextBox inventory = PathInput();
-        TextBox stateDirectory = PathInput();
+        TextBox packageDirectory = PathInput("plugin-package", PathSelectionKind.Folder);
+        TextBox packageOutput = PathInput("plugin-package-output", PathSelectionKind.SaveFile);
+        TextBox inventory = PathInput("plugin-inventory", PathSelectionKind.OpenFile);
+        TextBox stateDirectory = PathInput(
+            "plugin-state",
+            PathSelectionKind.NewFolder,
+            suggestedName: "new-plugin-state");
         ComboBox hardwareAction = new()
         {
             ItemsSource = new[] { "Capability value", "Haptic pulse", "Controller management" },
@@ -408,13 +429,13 @@ internal sealed class MainWindow : Window
         TextBox capabilityInstance = new() { PlaceholderText = "Optional exact instance ID" };
         TextBox capabilityValue = new()
         {
-            PlaceholderText = "true | 24 | choice | #RRGGBB | 40:20,70:60",
+            PlaceholderText = "true | 24 | choice | #RRGGBB | 40:20,70:60 | plain text",
         };
         void ApplyHardwareActionSelection()
         {
             bool capabilitySelected = hardwareAction.SelectedIndex == 0;
             capabilityId.IsEnabled = capabilitySelected;
-            capabilityInstance.IsEnabled = capabilitySelected;
+            capabilityInstance.IsEnabled = true;
             capabilityValue.IsEnabled = capabilitySelected;
         }
         hardwareAction.SelectionChanged += (_, _) => ApplyHardwareActionSelection();
@@ -461,10 +482,16 @@ internal sealed class MainWindow : Window
                 1 => new AttendedPluginActionRequest
                 {
                     Kind = AttendedPluginActionKind.HapticPulse,
+                    InstanceId = string.IsNullOrWhiteSpace(capabilityInstance.Text)
+                        ? null
+                        : capabilityInstance.Text,
                 },
                 2 => new AttendedPluginActionRequest
                 {
                     Kind = AttendedPluginActionKind.ControllerManagement,
+                    InstanceId = string.IsNullOrWhiteSpace(capabilityInstance.Text)
+                        ? null
+                        : capabilityInstance.Text,
                 },
                 _ => new AttendedPluginActionRequest
                 {
@@ -510,7 +537,7 @@ internal sealed class MainWindow : Window
             Labeled("New plugin state directory", stateDirectory),
             Labeled("Attended action", hardwareAction),
             Labeled("Capability ID (capability value only)", capabilityId),
-            Labeled("Capability instance (capability value only)", capabilityInstance),
+            Labeled("Exact capability/controller instance", capabilityInstance),
             Labeled("Capability value (capability value only)", capabilityValue),
             Buttons(validate, testSample, testPlugin),
             Buttons(generateGlyphs, pack),
@@ -559,9 +586,13 @@ internal sealed class MainWindow : Window
             ? $"set {action.CapabilityId} to {action.ValueText}, verify it, and restore its original value"
             : $"set {action.CapabilityId}/{action.InstanceId} to {action.ValueText}, verify it, and restore its original value",
         AttendedPluginActionKind.HapticPulse =>
-            "send one fixed 250 ms haptic pulse, stop output, and restore controller topology",
+            action.InstanceId is null
+                ? "send one fixed 250 ms haptic pulse, stop output, and restore controller topology"
+                : $"send one fixed 250 ms haptic pulse to {action.InstanceId}, stop output, and restore controller topology",
         AttendedPluginActionKind.ControllerManagement =>
-            "acquire controller management once and restore its verified topology",
+            action.InstanceId is null
+                ? "acquire controller management once and restore its verified topology"
+                : $"acquire controller instance {action.InstanceId} once and restore its verified topology",
         _ => action.Kind.ToString(),
     };
 
@@ -572,6 +603,7 @@ internal sealed class MainWindow : Window
     {
         if (_operation is not null)
         {
+            _operationStatus.Text = "An operation is already running. Cancel it or wait for completion.";
             return;
         }
 
@@ -581,6 +613,8 @@ internal sealed class MainWindow : Window
         _operation = current;
         _operationFinished = finished;
         _cancel.IsEnabled = true;
+        _tabs.IsEnabled = false;
+        _mode.IsEnabled = false;
         ApplyDisplayState(_displayState.Started());
         try
         {
@@ -614,6 +648,8 @@ internal sealed class MainWindow : Window
             }
             finished.TrySetResult(true);
             _cancel.IsEnabled = false;
+            _tabs.IsEnabled = true;
+            _mode.IsEnabled = true;
         }
     }
 
@@ -680,7 +716,7 @@ internal sealed class MainWindow : Window
         };
     }
 
-    private static Control Labeled(string label, Control input)
+    private Control Labeled(string label, Control input)
     {
         Grid row = new()
         {
@@ -692,8 +728,11 @@ internal sealed class MainWindow : Window
             Text = label,
             VerticalAlignment = VerticalAlignment.Center,
         });
-        Grid.SetColumn(input, 1);
-        row.Children.Add(input);
+        Control renderedInput = input is PathTextBox pathInput
+            ? PathPicker(pathInput)
+            : input;
+        Grid.SetColumn(renderedInput, 1);
+        row.Children.Add(renderedInput);
         return row;
     }
 
@@ -720,11 +759,243 @@ internal sealed class MainWindow : Window
         FontWeight = FontWeight.SemiBold,
     };
 
-    private static TextBox PathInput(string? initial = null) => new()
+    private TextBox PathInput(
+        string recentKey,
+        PathSelectionKind selectionKind,
+        string? initial = null,
+        string? suggestedName = null)
     {
-        Text = initial,
-        PlaceholderText = "Absolute path",
-    };
+        string? remembered = _recentPaths.GetValueOrDefault(recentKey);
+        string? value = remembered ?? initial;
+        if (selectionKind is PathSelectionKind.NewFolder && remembered is not null)
+        {
+            try
+            {
+                value = NextAvailableDirectory(remembered, suggestedName!);
+            }
+            catch (Exception exception) when (exception is IOException
+                or UnauthorizedAccessException
+                or ArgumentException
+                or NotSupportedException)
+            {
+                value = initial;
+            }
+        }
+        var input = new PathTextBox
+        {
+            RecentKey = recentKey,
+            SelectionKind = selectionKind,
+            SuggestedName = suggestedName,
+            Text = value,
+            PlaceholderText = "Absolute path",
+        };
+        input.LostFocus += (_, _) => RememberPath(input);
+        return input;
+    }
+
+    private Control PathPicker(PathTextBox input)
+    {
+        Grid picker = new()
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 8,
+        };
+        picker.Children.Add(input);
+        Button browse = new() { Content = "Browse…", MinWidth = 88 };
+        browse.Click += async (_, _) => await BrowseForPathAsync(input);
+        Grid.SetColumn(browse, 1);
+        picker.Children.Add(browse);
+        return picker;
+    }
+
+    private async Task BrowseForPathAsync(PathTextBox input)
+    {
+        try
+        {
+            string? selected = null;
+            switch (input.SelectionKind)
+            {
+                case PathSelectionKind.Folder:
+                case PathSelectionKind.NewFolder:
+                    IReadOnlyList<IStorageFolder> folders = await StorageProvider.OpenFolderPickerAsync(
+                        new FolderPickerOpenOptions
+                        {
+                            Title = "Select folder",
+                            AllowMultiple = false,
+                        });
+                    selected = folders.FirstOrDefault()?.Path.LocalPath;
+                    if (selected is not null && input.SelectionKind is PathSelectionKind.NewFolder)
+                    {
+                        selected = NextAvailableDirectory(selected, input.SuggestedName!);
+                    }
+                    break;
+                case PathSelectionKind.SaveFile:
+                    IStorageFile? saved = await StorageProvider.SaveFilePickerAsync(
+                        new FilePickerSaveOptions
+                        {
+                            Title = "Select new file",
+                            SuggestedFileName = string.IsNullOrWhiteSpace(input.Text)
+                                ? null
+                                : Path.GetFileName(input.Text),
+                        });
+                    selected = saved?.Path.LocalPath;
+                    break;
+                default:
+                    IReadOnlyList<IStorageFile> files = await StorageProvider.OpenFilePickerAsync(
+                        new FilePickerOpenOptions
+                        {
+                            Title = "Select file",
+                            AllowMultiple = false,
+                        });
+                    selected = files.FirstOrDefault()?.Path.LocalPath;
+                    break;
+            }
+
+            if (!string.IsNullOrWhiteSpace(selected))
+            {
+                input.Text = selected;
+                RememberPath(input);
+            }
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            ApplyDisplayState(_displayState.Failed(OperationFailureMessage(exception)));
+        }
+    }
+
+    private void RememberPath(PathTextBox input)
+    {
+        if (string.IsNullOrWhiteSpace(input.Text)
+            || input.Text.Length > MaximumRememberedPathCharacters)
+        {
+            return;
+        }
+
+        string remembered;
+        try
+        {
+            remembered = input.SelectionKind is PathSelectionKind.NewFolder
+                ? Path.GetDirectoryName(Path.GetFullPath(input.Text)) ?? input.Text
+                : input.Text;
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            return;
+        }
+
+        _recentPaths[input.RecentKey] = remembered;
+        SaveRecentPaths(_recentPaths);
+    }
+
+    private static string NextAvailableDirectory(string parent, string suggestedName)
+    {
+        string candidate = Path.Combine(parent, suggestedName);
+        for (int suffix = 2; Directory.Exists(candidate) || File.Exists(candidate); suffix++)
+        {
+            if (suffix > 100)
+            {
+                return Path.Combine(parent, $"{suggestedName}-{Guid.NewGuid():N}");
+            }
+
+            candidate = Path.Combine(parent, $"{suggestedName}-{suffix}");
+        }
+
+        return candidate;
+    }
+
+    private static Dictionary<string, string> LoadRecentPaths()
+    {
+        try
+        {
+            string path = RecentPathsFile();
+            FileInfo file = new(path);
+            if (!file.Exists || file.Length is <= 0 or > MaximumRecentPathsBytes)
+            {
+                return new Dictionary<string, string>(StringComparer.Ordinal);
+            }
+
+            Dictionary<string, string>? loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                File.ReadAllBytes(path));
+            return loaded is null
+                ? new Dictionary<string, string>(StringComparer.Ordinal)
+                : loaded
+                    .Where(pair => !string.IsNullOrWhiteSpace(pair.Key)
+                        && pair.Key.Length <= 128
+                        && !string.IsNullOrWhiteSpace(pair.Value)
+                        && pair.Value.Length <= MaximumRememberedPathCharacters)
+                    .Take(MaximumRecentPathCount)
+                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or JsonException)
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+    }
+
+    private static void SaveRecentPaths(IReadOnlyDictionary<string, string> paths)
+    {
+        string? temporary = null;
+        try
+        {
+            string path = RecentPathsFile();
+            string directory = Path.GetDirectoryName(path)!;
+            Directory.CreateDirectory(directory);
+            temporary = Path.Combine(directory, $"recent-paths.{Guid.NewGuid():N}.tmp");
+            Dictionary<string, string> bounded = paths
+                .Where(pair => !string.IsNullOrWhiteSpace(pair.Key)
+                    && pair.Key.Length <= 128
+                    && !string.IsNullOrWhiteSpace(pair.Value)
+                    && pair.Value.Length <= MaximumRememberedPathCharacters)
+                .Take(MaximumRecentPathCount)
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            byte[] json = JsonSerializer.SerializeToUtf8Bytes(bounded);
+            while (json.Length > MaximumRecentPathsBytes && bounded.Count > 0)
+            {
+                KeyValuePair<string, string> longest = bounded.MaxBy(pair => pair.Value.Length);
+                bounded.Remove(longest.Key);
+                json = JsonSerializer.SerializeToUtf8Bytes(bounded);
+            }
+
+            File.WriteAllBytes(temporary, json);
+            File.Move(temporary, path, overwrite: true);
+            temporary = null;
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            // Path history is a convenience only; workflow results remain authoritative.
+        }
+        finally
+        {
+            if (temporary is not null)
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch (Exception exception) when (exception is IOException
+                    or UnauthorizedAccessException)
+                {
+                    // Best-effort cleanup of a uniquely named local preferences temp file.
+                }
+            }
+        }
+    }
+
+    private static string RecentPathsFile() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WSGM Device Lab",
+        "recent-paths.json");
 
     private static string DefaultOutputDirectory() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -733,4 +1004,21 @@ internal sealed class MainWindow : Window
     private sealed record PreparedCaptureOperation(
         CaptureExportPlan? ExportPlan,
         object Display);
+
+    private enum PathSelectionKind
+    {
+        OpenFile,
+        SaveFile,
+        Folder,
+        NewFolder,
+    }
+
+    private sealed class PathTextBox : TextBox
+    {
+        internal required string RecentKey { get; init; }
+
+        internal required PathSelectionKind SelectionKind { get; init; }
+
+        internal string? SuggestedName { get; init; }
+    }
 }

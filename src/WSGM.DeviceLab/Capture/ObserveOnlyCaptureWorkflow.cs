@@ -536,16 +536,12 @@ internal static class ObserveOnlyCaptureWorkflow
         {
             cancellationToken.ThrowIfCancellationRequested();
             CaptureStreamFile stream = streams[index];
-            StringBuilder ndjson = new();
-            foreach (CaptureStreamEvent captureEvent in stream.Events)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                ndjson.Append(JsonSerializer.Serialize(
-                    captureEvent,
-                    DeviceLabCompactJson.CaptureStreamEvent)).Append('\n');
-            }
-
-            WriteNew(Path.Combine(directory, descriptors[index].Path.Replace('/', Path.DirectorySeparatorChar)), ndjson.ToString());
+            WriteNewNdjson(
+                Path.Combine(
+                    directory,
+                    descriptors[index].Path.Replace('/', Path.DirectorySeparatorChar)),
+                stream.Events,
+                cancellationToken);
         }
 
         // Completion is published last. A process death can leave reviewable raw files, but never a
@@ -569,6 +565,37 @@ internal static class ObserveOnlyCaptureWorkflow
         writer.Write(content);
         writer.WriteLine();
         writer.Flush();
+        stream.Flush(flushToDisk: true);
+    }
+
+    private static void WriteNewNdjson(
+        string path,
+        IReadOnlyList<CaptureStreamEvent> events,
+        CancellationToken cancellationToken)
+    {
+        string? directory = Path.GetDirectoryName(path);
+        if (directory is { Length: > 0 })
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        using FileStream stream = new(
+            path,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            4096,
+            FileOptions.WriteThrough);
+        foreach (CaptureStreamEvent captureEvent in events)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            byte[] json = JsonSerializer.SerializeToUtf8Bytes(
+                captureEvent,
+                DeviceLabCompactJson.CaptureStreamEvent);
+            stream.Write(json);
+            stream.WriteByte((byte)'\n');
+        }
+
         stream.Flush(flushToDisk: true);
     }
 

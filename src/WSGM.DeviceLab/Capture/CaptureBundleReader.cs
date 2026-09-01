@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -59,6 +60,7 @@ internal sealed record CaptureBundleReadResult
 internal static class CaptureBundleReader
 {
     private const int MaximumJsonLineBytes = 4 * 1024 * 1024;
+    private const int MaximumHashManifestBytes = 2 * 1024 * 1024;
 
     /// <summary>Reads one archive from a seekable stream and leaves the stream open.</summary>
     /// <param name="source">Untrusted archive stream.</param>
@@ -114,15 +116,8 @@ internal static class CaptureBundleReader
                 }
             }
 
-            Dictionary<string, byte[]> content = new(StringComparer.OrdinalIgnoreCase);
-            foreach ((string path, ZipArchiveEntry entry) in entries)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                content[path] = ReadEntry(entry, cancellationToken);
-            }
-
             if (!TryVerifyHashes(
-                content,
+                entries,
                 cancellationToken,
                 out Dictionary<string, string> hashes,
                 out string? hashError))
@@ -131,24 +126,28 @@ internal static class CaptureBundleReader
             }
 
             ShareableCaptureManifest manifest = Deserialize(
-                content[CaptureBundleLayout.ManifestPath],
-                DeviceLabJsonContext.Default.ShareableCaptureManifest);
+                entries[CaptureBundleLayout.ManifestPath],
+                DeviceLabJsonContext.Default.ShareableCaptureManifest,
+                cancellationToken);
             ObserveOnlyRecipe recipe = Deserialize(
-                content[CaptureBundleLayout.RecipePath],
-                DeviceLabJsonContext.Default.ObserveOnlyRecipe);
+                entries[CaptureBundleLayout.RecipePath],
+                DeviceLabJsonContext.Default.ObserveOnlyRecipe,
+                cancellationToken);
             MachineInventory inventory = Deserialize(
-                content[CaptureBundleLayout.InventoryPath],
-                DeviceLabJsonContext.Default.MachineInventory);
+                entries[CaptureBundleLayout.InventoryPath],
+                DeviceLabJsonContext.Default.MachineInventory,
+                cancellationToken);
             CaptureRedactionManifest redaction = Deserialize(
-                content[CaptureBundleLayout.RedactionPath],
-                DeviceLabJsonContext.Default.CaptureRedactionManifest);
+                entries[CaptureBundleLayout.RedactionPath],
+                DeviceLabJsonContext.Default.CaptureRedactionManifest,
+                cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
             List<CaptureStreamFile> streams = [];
             foreach (CaptureStreamDescriptor descriptor in manifest.Streams)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!content.TryGetValue(descriptor.Path, out byte[]? bytes))
+                if (!entries.TryGetValue(descriptor.Path, out ZipArchiveEntry? entry))
                 {
                     return Failure(CaptureBundleReadFailure.MissingEntry, $"Stream '{descriptor.Path}' is absent.");
                 }
@@ -157,7 +156,7 @@ internal static class CaptureBundleReader
                 {
                     SourceId = descriptor.SourceId,
                     Events = DeserializeLines(
-                        bytes,
+                        entry,
                         DeviceLabCompactJson.CaptureStreamEvent,
                         cancellationToken),
                 });
@@ -167,7 +166,7 @@ internal static class CaptureBundleReader
             foreach (CaptureAnalysisDescriptor descriptor in manifest.Analysis)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!content.TryGetValue(descriptor.Path, out byte[]? bytes))
+                if (!entries.TryGetValue(descriptor.Path, out ZipArchiveEntry? entry))
                 {
                     return Failure(CaptureBundleReadFailure.MissingEntry, $"Analysis '{descriptor.Path}' is absent.");
                 }
@@ -176,7 +175,7 @@ internal static class CaptureBundleReader
                 {
                     AnalyzerId = descriptor.AnalyzerId,
                     Results = DeserializeLines(
-                        bytes,
+                        entry,
                         DeviceLabCompactJson.CaptureAnalysisResult,
                         cancellationToken),
                 });
@@ -186,12 +185,16 @@ internal static class CaptureBundleReader
             foreach (CaptureBlobDescriptor descriptor in manifest.Blobs)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!content.TryGetValue(descriptor.Path, out byte[]? bytes))
+                if (!entries.TryGetValue(descriptor.Path, out ZipArchiveEntry? entry))
                 {
                     return Failure(CaptureBundleReadFailure.MissingEntry, $"Blob '{descriptor.Path}' is absent.");
                 }
 
-                blobs.Add(new CaptureBlobFile { Descriptor = descriptor, Bytes = bytes });
+                blobs.Add(new CaptureBlobFile
+                {
+                    Descriptor = descriptor,
+                    Bytes = ReadEntry(entry, cancellationToken),
+                });
             }
 
             HashSet<string> declared = new(StringComparer.OrdinalIgnoreCase)
@@ -206,7 +209,7 @@ internal static class CaptureBundleReader
             declared.UnionWith(manifest.Analysis.Select(item => item.Path));
             declared.UnionWith(manifest.Blobs.Select(blob => blob.Path));
             cancellationToken.ThrowIfCancellationRequested();
-            if (!declared.SetEquals(content.Keys))
+            if (!declared.SetEquals(entries.Keys))
             {
                 return Failure(CaptureBundleReadFailure.InvalidSchema, "Archive contains undeclared entries.");
             }
@@ -285,7 +288,7 @@ internal static class CaptureBundleReader
     }
 
     private static bool TryVerifyHashes(
-        IReadOnlyDictionary<string, byte[]> content,
+        IReadOnlyDictionary<string, ZipArchiveEntry> entries,
         CancellationToken cancellationToken,
         out Dictionary<string, string> hashes,
         out string? error)
@@ -295,7 +298,15 @@ internal static class CaptureBundleReader
         string text;
         try
         {
-            text = new UTF8Encoding(false, true).GetString(content[CaptureBundleLayout.HashesPath]);
+            ZipArchiveEntry hashEntry = entries[CaptureBundleLayout.HashesPath];
+            if (hashEntry.Length > MaximumHashManifestBytes)
+            {
+                error = "Hash manifest exceeds its decode budget.";
+                return false;
+            }
+
+            text = new UTF8Encoding(false, true).GetString(
+                ReadEntry(hashEntry, cancellationToken));
         }
         catch (DecoderFallbackException)
         {
@@ -324,7 +335,7 @@ internal static class CaptureBundleReader
             }
         }
 
-        string[] expectedPaths = [.. content.Keys
+        string[] expectedPaths = [.. entries.Keys
             .Where(path => !string.Equals(path, CaptureBundleLayout.HashesPath, StringComparison.OrdinalIgnoreCase))];
         if (!hashes.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(expectedPaths))
         {
@@ -335,7 +346,8 @@ internal static class CaptureBundleReader
         foreach ((string path, string expected) in hashes)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!string.Equals(CaptureHashFile.Hash(content[path]), expected, StringComparison.Ordinal))
+            if (!string.Equals(HashEntry(entries[path], cancellationToken), expected,
+                StringComparison.Ordinal))
             {
                 error = $"Content hash mismatch for '{path}'.";
                 return false;
@@ -345,51 +357,137 @@ internal static class CaptureBundleReader
         return true;
     }
 
-    private static T Deserialize<T>(byte[] bytes, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
-        where T : class => JsonSerializer.Deserialize(bytes, typeInfo)
-        ?? throw new InvalidDataException("A required JSON entry decoded to null.");
+    private static string HashEntry(
+        ZipArchiveEntry entry,
+        CancellationToken cancellationToken)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using Stream input = entry.Open();
+        byte[] buffer = new byte[64 * 1024];
+        long total = 0;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int read = input.Read(buffer, 0, buffer.Length);
+            if (read == 0)
+            {
+                break;
+            }
+
+            total = checked(total + read);
+            if (total > entry.Length)
+            {
+                throw new InvalidDataException("Archive entry exceeded its declared length.");
+            }
+
+            hash.AppendData(buffer.AsSpan(0, read));
+        }
+
+        if (total != entry.Length)
+        {
+            throw new InvalidDataException("Archive entry ended before its declared length.");
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static T Deserialize<T>(
+        ZipArchiveEntry entry,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo,
+        CancellationToken cancellationToken)
+        where T : class
+    {
+        using Stream input = entry.Open();
+        return JsonSerializer.DeserializeAsync(input, typeInfo, cancellationToken)
+            .AsTask().GetAwaiter().GetResult()
+            ?? throw new InvalidDataException("A required JSON entry decoded to null.");
+    }
 
     private static IReadOnlyList<T> DeserializeLines<T>(
-        byte[] bytes,
+        ZipArchiveEntry entry,
         System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo,
         CancellationToken cancellationToken)
         where T : class
     {
         List<T> values = [];
-        int start = 0;
-        for (int offset = 0; offset <= bytes.Length; offset++)
+        using Stream input = entry.Open();
+        using MemoryStream line = new(capacity: Math.Min(MaximumJsonLineBytes, 64 * 1024));
+        byte[] buffer = new byte[64 * 1024];
+        long total = 0;
+        while (true)
         {
-            if ((offset & 0xffff) == 0)
+            cancellationToken.ThrowIfCancellationRequested();
+            int read = input.Read(buffer, 0, buffer.Length);
+            if (read == 0)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-            if (offset != bytes.Length && bytes[offset] != (byte)'\n')
-            {
-                continue;
+                break;
             }
 
-            int length = offset - start;
-            if (length > MaximumJsonLineBytes)
+            total = checked(total + read);
+            if (total > entry.Length)
             {
-                throw new InvalidDataException("NDJSON line exceeds its decode budget.");
+                throw new InvalidDataException("Archive entry exceeded its declared length.");
             }
 
-            if (length > 0)
+            int start = 0;
+            for (int offset = 0; offset < read; offset++)
             {
-                ReadOnlySpan<byte> line = bytes.AsSpan(start, length);
-                if (line[^1] == (byte)'\r')
+                if (buffer[offset] != (byte)'\n')
                 {
-                    line = line[..^1];
+                    continue;
                 }
 
-                values.Add(JsonSerializer.Deserialize(line, typeInfo)
-                    ?? throw new InvalidDataException("NDJSON line decoded to null."));
+                AppendLineBytes(line, buffer.AsSpan(start, offset - start));
+                DecodeLine(line, values, typeInfo);
+                line.SetLength(0);
+                start = offset + 1;
             }
 
-            start = offset + 1;
+            AppendLineBytes(line, buffer.AsSpan(start, read - start));
         }
 
+        if (total != entry.Length)
+        {
+            throw new InvalidDataException("Archive entry ended before its declared length.");
+        }
+
+        DecodeLine(line, values, typeInfo);
         return values;
+    }
+
+    private static void AppendLineBytes(MemoryStream line, ReadOnlySpan<byte> bytes)
+    {
+        if (line.Length + bytes.Length > MaximumJsonLineBytes)
+        {
+            throw new InvalidDataException("NDJSON line exceeds its decode budget.");
+        }
+
+        line.Write(bytes);
+    }
+
+    private static void DecodeLine<T>(
+        MemoryStream line,
+        ICollection<T> values,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
+        where T : class
+    {
+        int length = checked((int)line.Length);
+        if (length == 0)
+        {
+            return;
+        }
+
+        ReadOnlySpan<byte> bytes = line.GetBuffer().AsSpan(0, length);
+        if (bytes[^1] == (byte)'\r')
+        {
+            bytes = bytes[..^1];
+        }
+
+        if (!bytes.IsEmpty)
+        {
+            values.Add(JsonSerializer.Deserialize(bytes, typeInfo)
+                ?? throw new InvalidDataException("NDJSON line decoded to null."));
+        }
     }
 
     private static CaptureBundleReadResult Failure(CaptureBundleReadFailure failure, string? detail) => new()

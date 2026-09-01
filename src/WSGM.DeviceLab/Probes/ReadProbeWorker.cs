@@ -4,6 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using WSGM.DeviceLab.Application;
 
 namespace WSGM.DeviceLab.Probes;
 
@@ -22,6 +23,7 @@ internal static class ReadProbeWorker
     private const int ExitRejected = 65;
     private const int ExitFailure = 70;
     private const int MaximumRequestBytes = 262_144;
+    private static readonly TimeSpan AuthorizationDeadline = TimeSpan.FromSeconds(5);
 
     internal static int Run(IReadOnlyList<string> args)
     {
@@ -44,19 +46,49 @@ internal static class ReadProbeWorker
 
     private static async Task<int> RunAsync(Arguments arguments, CancellationToken cancellationToken)
     {
-        if (File.Exists(arguments.ResultPath))
+        using CancellationTokenSource authorization =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        authorization.CancelAfter(AuthorizationDeadline);
+        byte[]? authorizationSecret = await SelfWorkerAuthorization.ReadSecretAsync(
+            arguments.AuthorizationHandle,
+            authorization.Token).ConfigureAwait(false);
+        if (authorizationSecret is null)
         {
-            Console.Error.WriteLine("The read-probe worker refuses to overwrite an existing result file.");
+            Console.Error.WriteLine("The read-probe worker was not authorized by its supervisor.");
             return ExitRejected;
         }
 
-        ReadProbeWorkerRequest? request = await ReadRequestAsync(arguments.RequestPath, cancellationToken)
+        if (!SelfWorkerAuthorization.TryConstrainSessionFiles(
+                arguments.RequestPath,
+                arguments.ResultPath,
+                "probe-request.json",
+                "probe-result.json",
+                out string? requestPath,
+                out string? resultPath))
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(authorizationSecret);
+            Console.Error.WriteLine("The read-probe worker session paths were rejected.");
+            return ExitRejected;
+        }
+
+        ReadProbeWorkerRequest? request = await ReadRequestAsync(requestPath!, cancellationToken)
             .ConfigureAwait(false);
         if (request is null
             || request.SchemaVersion != 1
             || !string.Equals(request.ProbeId, arguments.ProbeId, StringComparison.Ordinal))
         {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(authorizationSecret);
             Console.Error.WriteLine("The read-probe request identity did not match its command envelope.");
+            return ExitRejected;
+        }
+
+        bool authorized = SelfWorkerAuthorization.VerifySecret(
+            authorizationSecret,
+            request.AuthorizationSha256);
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(authorizationSecret);
+        if (!authorized)
+        {
+            Console.Error.WriteLine("The read-probe worker was not authorized by its supervisor.");
             return ExitRejected;
         }
 
@@ -72,7 +104,7 @@ internal static class ReadProbeWorker
             profile,
             request,
             cancellationToken).ConfigureAwait(false);
-        await WriteResultAsync(arguments.ResultPath, response, cancellationToken).ConfigureAwait(false);
+        await WriteResultAsync(resultPath!, response, cancellationToken).ConfigureAwait(false);
         return ExitSuccess;
     }
 
@@ -128,29 +160,32 @@ internal static class ReadProbeWorker
         for (int index = 0; index < args.Count; index += 2)
         {
             if (index + 1 >= args.Count
-                || args[index] is not ("--probe" or "--request" or "--result")
+                || args[index] is not ("--probe" or "--request" or "--result"
+                    or "--authorization-handle")
                 || !values.TryAdd(args[index], args[index + 1]))
             {
                 parsed = null;
-                error = "The read-probe worker requires exactly --probe, --request, and --result once each.";
+                error = "The read-probe worker requires exactly --probe, --request, --result, and --authorization-handle once each.";
                 return false;
             }
         }
 
-        if (values.Count != 3
+        if (values.Count != 4
             || !values.TryGetValue("--probe", out string? probeId)
             || !values.TryGetValue("--request", out string? requestPath)
             || !values.TryGetValue("--result", out string? resultPath)
+            || !values.TryGetValue("--authorization-handle", out string? authorizationHandle)
             || string.IsNullOrWhiteSpace(probeId)
-            || !File.Exists(requestPath)
-            || string.IsNullOrWhiteSpace(resultPath))
+            || string.IsNullOrWhiteSpace(requestPath)
+            || string.IsNullOrWhiteSpace(resultPath)
+            || string.IsNullOrWhiteSpace(authorizationHandle))
         {
             parsed = null;
             error = "The read-probe worker arguments were incomplete or malformed.";
             return false;
         }
 
-        parsed = new Arguments(probeId, requestPath, resultPath);
+        parsed = new Arguments(probeId, requestPath, resultPath, authorizationHandle);
         error = null;
         return true;
     }
@@ -158,5 +193,6 @@ internal static class ReadProbeWorker
     private sealed record Arguments(
         string ProbeId,
         string RequestPath,
-        string ResultPath);
+        string ResultPath,
+        string AuthorizationHandle);
 }

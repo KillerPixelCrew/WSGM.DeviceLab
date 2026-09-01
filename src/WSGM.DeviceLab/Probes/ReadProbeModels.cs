@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
+using System.Threading;
 
 namespace WSGM.DeviceLab.Probes;
 
@@ -256,6 +258,9 @@ internal sealed record ReadProbeWorkerRequest
 
     /// <summary>Compiled repetition count.</summary>
     public required int Repetitions { get; init; }
+
+    /// <summary>SHA-256 of the one-use secret delivered only through the inherited pipe.</summary>
+    public string? AuthorizationSha256 { get; init; }
 }
 
 /// <summary>Observed lifecycle of one disposable Device Lab self-worker.</summary>
@@ -267,6 +272,9 @@ internal sealed record ReadProbeProcessOutcome
     /// <summary>Whether the supervisor killed it after its deadline.</summary>
     public required bool TimedOut { get; init; }
 
+    /// <summary>Whether Windows confirmed that no worker or descendant remains contained.</summary>
+    public required bool ContainmentVerified { get; init; }
+
     /// <summary>Exit code, when the process reached an exit state.</summary>
     public int? ExitCode { get; init; }
 
@@ -275,6 +283,21 @@ internal sealed record ReadProbeProcessOutcome
 
     /// <summary>Bounded stderr detail.</summary>
     public string? Error { get; init; }
+}
+
+/// <summary>Caller cancellation observed only after bounded disposable-worker teardown.</summary>
+internal sealed class DisposableWorkerCanceledException : OperationCanceledException
+{
+    internal DisposableWorkerCanceledException(
+        bool containmentVerified,
+        CancellationToken cancellationToken)
+        : base("The disposable worker operation was cancelled.", innerException: null, cancellationToken)
+    {
+        ContainmentVerified = containmentVerified;
+    }
+
+    /// <summary>Whether Windows confirmed that every contained process exited before propagation.</summary>
+    internal bool ContainmentVerified { get; }
 }
 
 /// <summary>End-to-end disposition of a supervised read-probe run.</summary>

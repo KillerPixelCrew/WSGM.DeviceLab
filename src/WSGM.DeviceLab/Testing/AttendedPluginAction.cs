@@ -34,7 +34,7 @@ internal sealed record AttendedPluginActionRequest
     /// <summary>Exact semantic capability ID for <see cref="AttendedPluginActionKind.CapabilityValue"/>.</summary>
     public string? CapabilityId { get; init; }
 
-    /// <summary>Optional exact capability instance discriminator.</summary>
+    /// <summary>Optional exact capability, controller-source, or haptic-sink instance discriminator.</summary>
     public string? InstanceId { get; init; }
 
     /// <summary>Semantic value text parsed against the selected descriptor.</summary>
@@ -50,10 +50,10 @@ internal sealed record AttendedPluginActionReport
     /// <summary>Whether the selected action and its mandatory restoration were verified.</summary>
     public required bool Passed { get; init; }
 
-    /// <summary>Selected capability ID when the action targets a value.</summary>
+    /// <summary>Selected value, controller-source, or haptic-sink capability ID.</summary>
     public string? CapabilityId { get; init; }
 
-    /// <summary>Selected capability instance when the action targets a value.</summary>
+    /// <summary>Selected value, controller-source, or haptic-sink instance.</summary>
     public string? InstanceId { get; init; }
 
     /// <summary>Original hardware value captured before the selected change.</summary>
@@ -133,12 +133,12 @@ internal static class AttendedPluginActionRunner
             AttendedPluginActionKind.HapticPulse => RunControllerActionAsync(
                 plugin,
                 host,
-                request.Kind,
+                request,
                 cancellationToken),
             AttendedPluginActionKind.ControllerManagement => RunControllerActionAsync(
                 plugin,
                 host,
-                request.Kind,
+                request,
                 cancellationToken),
             _ => Task.FromResult(Failed(request.Kind, "The selected attended action is unsupported.")),
         };
@@ -280,13 +280,15 @@ internal static class AttendedPluginActionRunner
     private static async Task<AttendedPluginActionReport> RunControllerActionAsync(
         IDevicePlugin plugin,
         TestPluginHostAdapter host,
-        AttendedPluginActionKind kind,
+        AttendedPluginActionRequest request,
         CancellationToken cancellationToken)
     {
+        AttendedPluginActionKind kind = request.Kind;
         CapabilityRole requiredRole = kind is AttendedPluginActionKind.HapticPulse
             ? CapabilityRole.HapticSink
             : CapabilityRole.ControllerSource;
-        if (!TrySelectRole(host, requiredRole, out CapabilityDescriptorSet? descriptorSet,
+        if (!TrySelectRole(host, requiredRole, request.InstanceId,
+            out CapabilityDescriptorSet? descriptorSet,
             out CapabilityDescriptor? descriptor, out string? selectionError))
         {
             return Failed(kind, selectionError!);
@@ -404,6 +406,8 @@ internal static class AttendedPluginActionRunner
         {
             Kind = kind,
             Passed = actionPassed && restorationVerified && error is null,
+            CapabilityId = descriptor!.CapabilityId,
+            InstanceId = descriptor.InstanceId,
             HapticPulse = pulse,
             HapticPulseSent = pulseSent,
             HapticStopAttempted = stopAttempted,
@@ -487,18 +491,38 @@ internal static class AttendedPluginActionRunner
     private static bool TrySelectRole(
         TestPluginHostAdapter host,
         CapabilityRole role,
+        string? instanceId,
         out CapabilityDescriptorSet? descriptorSet,
         out CapabilityDescriptor? descriptor,
         out string? error)
     {
         descriptorSet = host.DescriptorSets.LastOrDefault();
-        descriptor = descriptorSet?.Descriptors.FirstOrDefault(candidate => candidate.Role == role);
-        if (descriptorSet is null || descriptor is null)
+        descriptor = null;
+        if (descriptorSet is null)
         {
-            error = $"The plugin did not publish a {role} capability.";
+            error = "The plugin published no capability descriptors.";
             return false;
         }
 
+        CapabilityDescriptor[] matches = [.. descriptorSet.Descriptors.Where(candidate =>
+            candidate.Role == role
+            && (instanceId is null
+                || string.Equals(candidate.InstanceId, instanceId, StringComparison.Ordinal)))];
+        if (matches.Length == 0)
+        {
+            error = instanceId is null
+                ? $"The plugin did not publish a {role} capability."
+                : $"The plugin did not publish {role} for instance '{instanceId}'.";
+            return false;
+        }
+
+        if (matches.Length != 1)
+        {
+            error = $"The plugin published multiple {role} instances; select one exact instance ID.";
+            return false;
+        }
+
+        descriptor = matches[0];
         error = null;
         return true;
     }
@@ -633,6 +657,25 @@ internal static class AttendedPluginActionRunner
                     CurveValue = points,
                 };
                 break;
+            case CapabilityValueKind.Text:
+                string? textError = null;
+                if (descriptor.MaximumLength is not > 0
+                    || !PlainText.TryValidate(
+                        text,
+                        descriptor.MaximumLength.Value,
+                        "value",
+                        out textError))
+                {
+                    error = textError ?? "The text capability did not declare a valid length bound.";
+                    return false;
+                }
+
+                value = new CapabilityValue
+                {
+                    Kind = CapabilityValueKind.Text,
+                    TextValue = text,
+                };
+                break;
             case CapabilityValueKind.None:
             default:
                 error = "The selected capability does not accept a semantic value.";
@@ -718,6 +761,10 @@ internal static class AttendedPluginActionRunner
                 StringComparison.Ordinal),
             CapabilityValueKind.Color => left.ColorValue == right.ColorValue,
             CapabilityValueKind.Curve => left.CurveValue.SequenceEqual(right.CurveValue),
+            CapabilityValueKind.Text => string.Equals(
+                left.TextValue,
+                right.TextValue,
+                StringComparison.Ordinal),
             CapabilityValueKind.None => true,
             _ => false,
         };

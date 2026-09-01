@@ -78,12 +78,14 @@ internal static partial class ScaffoldFromCaptureWorkflow
     /// <param name="outputDirectory">New explicit output directory.</param>
     /// <param name="boundaries">Filesystem safety boundaries.</param>
     /// <param name="cancellationToken">Cancels validation or publication.</param>
+    /// <param name="usbInstanceId">Exact endpoint selection when the capture contains more than one candidate.</param>
     /// <returns>The copied template files and exact identity.</returns>
     public static PluginScaffoldResult Run(
         string capturePath,
         string outputDirectory,
         DeviceLabPathBoundaries boundaries,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? usbInstanceId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(capturePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -97,7 +99,7 @@ internal static partial class ScaffoldFromCaptureWorkflow
             throw new InvalidDataException($"Source capture was rejected: {read.Failure} ({read.Detail}).");
         }
 
-        PluginScaffoldIdentity identity = SelectExactIdentity(read.Bundle);
+        PluginScaffoldIdentity identity = SelectExactIdentity(read.Bundle, usbInstanceId);
         string slug = Slug(identity.BaseboardProduct);
         string rootNamespace = $"WSGM.Device.Scaffold.{Identifier(slug)}";
         string packageId = $"wsgm.device.scaffold.{slug}";
@@ -190,9 +192,11 @@ internal static partial class ScaffoldFromCaptureWorkflow
         };
     }
 
-    private static PluginScaffoldIdentity SelectExactIdentity(SanitizedCaptureBundle bundle)
+    private static PluginScaffoldIdentity SelectExactIdentity(
+        SanitizedCaptureBundle bundle,
+        string? usbInstanceId)
     {
-        UsbInterfaceInventory endpoint = bundle.Inventory.UsbInterfaces
+        UsbInterfaceInventory[] endpoints = [.. bundle.Inventory.UsbInterfaces
             .Where(candidate => candidate.Present
                 && candidate.VendorId is { Length: 4 }
                 && candidate.ProductId is { Length: 4 }
@@ -200,8 +204,40 @@ internal static partial class ScaffoldFromCaptureWorkflow
             .OrderBy(candidate => candidate.VendorId, StringComparer.Ordinal)
             .ThenBy(candidate => candidate.ProductId, StringComparer.Ordinal)
             .ThenBy(candidate => candidate.DeviceRelease, StringComparer.Ordinal)
-            .FirstOrDefault()
-            ?? throw new InvalidDataException("Capture has no present exact USB VID/PID/release endpoint.");
+            .ThenBy(candidate => candidate.InstanceId, StringComparer.Ordinal)];
+        if (endpoints.Length == 0)
+        {
+            throw new InvalidDataException("Capture has no present exact USB VID/PID/release endpoint.");
+        }
+
+        UsbInterfaceInventory endpoint;
+        if (string.IsNullOrWhiteSpace(usbInstanceId))
+        {
+            if (endpoints.Length != 1)
+            {
+                string choices = string.Join(
+                    ", ",
+                    endpoints.Take(16).Select(candidate => candidate.InstanceId));
+                throw new InvalidDataException(
+                    $"Capture has {endpoints.Length} exact USB endpoints. Select one exact instance ID: {choices}.");
+            }
+
+            endpoint = endpoints[0];
+        }
+        else
+        {
+            UsbInterfaceInventory[] matches = [.. endpoints.Where(candidate => string.Equals(
+                candidate.InstanceId,
+                usbInstanceId,
+                StringComparison.Ordinal))];
+            if (matches.Length != 1)
+            {
+                throw new InvalidDataException(
+                    "The selected USB instance ID did not identify exactly one present exact endpoint.");
+            }
+
+            endpoint = matches[0];
+        }
 
         return new PluginScaffoldIdentity
         {

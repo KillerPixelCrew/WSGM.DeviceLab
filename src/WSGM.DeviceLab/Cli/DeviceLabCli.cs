@@ -236,8 +236,10 @@ internal static class DeviceLabCli
 
         CaptureExportPlan plan = prepared.ExportPlan;
         Console.Error.WriteLine($"Private session: {plan.PrivateWorkingDirectory}");
-        Console.Error.WriteLine("Redaction preview:");
-        Console.Error.WriteLine(JsonSerializer.Serialize(plan.Redaction, OutputJson));
+        Console.Error.WriteLine("Sanitized shareable-content preview:");
+        Console.Error.WriteLine(JsonSerializer.Serialize(
+            CapturePrivacyPreview.Create(plan.Bundle),
+            OutputJson));
         Console.Error.Write("Type EXPORT to write the sanitized .wsgmcap, or press Enter to keep it private: ");
         bool exportConfirmed = string.Equals(Console.ReadLine(), "EXPORT", StringComparison.Ordinal);
         CaptureExportResult exported = Application().ExportCapture(plan, exportConfirmed);
@@ -323,12 +325,16 @@ internal static class DeviceLabCli
     {
         string? from = Option(args, "--from", "-f");
         string? output = Option(args, "--out-dir", "-o");
+        string? usbInstance = Option(args, "--usb-instance");
         if (from is null || output is null)
         {
-            return UsageError("scaffold requires --from <capture> --out-dir <new-directory>.");
+            return UsageError("scaffold requires --from <capture> --out-dir <new-directory>; use --usb-instance when the capture has multiple exact USB endpoints.");
         }
 
-        WriteJson(Application().Scaffold(from, output));
+        WriteJson(Application().Scaffold(
+            from,
+            output,
+            usbInstanceId: usbInstance));
         return Success;
     }
 
@@ -498,7 +504,7 @@ internal static class DeviceLabCli
             "capture" => UnknownToken(tail, 1, [], ["--recipe", "--out-dir", "-o"]),
             "correlate" => UnknownToken(tail, 1, [], ["--action", "--sources"]),
             "fixture" => UnknownToken(tail, 1, [], ["--from", "-f", "--id", "--out-dir", "-o"]),
-            "scaffold" => UnknownToken(tail, 0, [], ["--from", "-f", "--out-dir", "-o"]),
+            "scaffold" => UnknownToken(tail, 0, [], ["--from", "-f", "--out-dir", "-o", "--usb-instance"]),
             "pack" => UnknownToken(tail, 1, [], ["--out", "-o"]),
             "test" when tail.Length > 0 && tail[0] is "hardware" => null,
             "test" when tail.Length > 0 && tail[0] is "plugin" =>
@@ -585,8 +591,9 @@ internal static class DeviceLabCli
     {
         writer.WriteLine("wsgm-device doctor|inventory|candidates|probe-read|capture|inspect|compare|correlate|fixture|scaffold|glyph|validate|test|pack");
         writer.WriteLine("test: sample | plugin <dir> --from <inventory>");
+        writer.WriteLine("scaffold --from <capture> --out-dir <new-dir> [--usb-instance <exact-id>]");
         writer.WriteLine("test hardware <dir> --from <inventory> --state-dir <new-dir> --action capability --capability <id> [--instance <id>] --value <value>");
-        writer.WriteLine("test hardware <dir> --from <inventory> --state-dir <new-dir> --action haptic|controller");
+        writer.WriteLine("test hardware <dir> --from <inventory> --state-dir <new-dir> --action haptic|controller [--instance <id>]");
         writer.WriteLine("Only 'test hardware' may access or change hardware, and it requires immediate local confirmation.");
     }
 
@@ -595,9 +602,13 @@ internal static class DeviceLabCli
         AttendedPluginActionKind.CapabilityValue => action.InstanceId is null
             ? $"capability value {action.CapabilityId}={action.ValueText}"
             : $"capability value {action.CapabilityId}/{action.InstanceId}={action.ValueText}",
-        AttendedPluginActionKind.HapticPulse => "one fixed 250 ms haptic pulse with zero-output cleanup",
+        AttendedPluginActionKind.HapticPulse => action.InstanceId is null
+            ? "one fixed 250 ms haptic pulse with zero-output cleanup"
+            : $"one fixed 250 ms haptic pulse on {action.InstanceId} with zero-output cleanup",
         AttendedPluginActionKind.ControllerManagement =>
-            "one controller-management acquisition with verified topology release",
+            action.InstanceId is null
+                ? "one controller-management acquisition with verified topology release"
+                : $"one controller-management acquisition for {action.InstanceId} with verified topology release",
         _ => action.Kind.ToString(),
     };
 }

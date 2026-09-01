@@ -2,10 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using WSGM.DeviceLab.Application;
 using WSGM.DeviceLab.Preflight;
 
 namespace WSGM.DeviceLab.Probes;
@@ -18,6 +20,7 @@ internal interface IReadProbeProcessLauncher
     /// <param name="arguments">Fixed hidden self-worker arguments.</param>
     /// <param name="timeout">Hard process deadline.</param>
     /// <param name="resultPath">Result file which must not exist before launch.</param>
+    /// <param name="authorizationSecret">One-use secret delivered over an inherited pipe.</param>
     /// <param name="cancellationToken">Caller cancellation.</param>
     /// <returns>Observed process lifecycle.</returns>
     Task<ReadProbeProcessOutcome> RunAsync(
@@ -25,6 +28,7 @@ internal interface IReadProbeProcessLauncher
         IReadOnlyList<string> arguments,
         TimeSpan timeout,
         string resultPath,
+        ReadOnlyMemory<byte> authorizationSecret,
         CancellationToken cancellationToken);
 }
 
@@ -32,6 +36,7 @@ internal interface IReadProbeProcessLauncher
 internal sealed class SystemReadProbeProcessLauncher : IReadProbeProcessLauncher
 {
     private const int MaximumErrorLength = 16_384;
+    private static readonly TimeSpan TeardownDeadline = TimeSpan.FromSeconds(2);
 
     /// <inheritdoc/>
     public async Task<ReadProbeProcessOutcome> RunAsync(
@@ -39,10 +44,23 @@ internal sealed class SystemReadProbeProcessLauncher : IReadProbeProcessLauncher
         IReadOnlyList<string> arguments,
         TimeSpan timeout,
         string resultPath,
+        ReadOnlyMemory<byte> authorizationSecret,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
         ArgumentNullException.ThrowIfNull(arguments);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resultPath);
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(5))
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+
+        if (authorizationSecret.Length != SelfWorkerAuthorization.SecretBytes)
+        {
+            throw new ArgumentException("Worker authorization has an invalid length.", nameof(authorizationSecret));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         ProcessStartInfo startInfo = new()
         {
@@ -57,21 +75,64 @@ internal sealed class SystemReadProbeProcessLauncher : IReadProbeProcessLauncher
             startInfo.ArgumentList.Add(argument);
         }
 
-        using Process process = new() { StartInfo = startInfo };
+        WorkerJobObject containment;
         try
         {
-            if (!process.Start())
-            {
-                return Failed("Device Lab's read-probe worker did not start.");
-            }
+            containment = WorkerJobObject.Create();
         }
-        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
+        catch (System.ComponentModel.Win32Exception exception)
         {
             return Failed(exception.Message);
         }
 
-        Task<string> errorRead = process.StandardError.ReadToEndAsync(cancellationToken);
-        _ = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        using WorkerJobObject containmentScope = containment;
+        using AnonymousPipeServerStream authorizationPipe = new(
+            PipeDirection.Out,
+            HandleInheritability.Inheritable);
+        startInfo.ArgumentList.Add("--authorization-handle");
+        startInfo.ArgumentList.Add(authorizationPipe.GetClientHandleAsString());
+
+        using Process process = new() { StartInfo = startInfo };
+        bool assignedToContainment = false;
+        try
+        {
+            if (!process.Start())
+            {
+                return Failed("Device Lab's disposable self-worker did not start.");
+            }
+
+            containment.Assign(process);
+            assignedToContainment = true;
+            authorizationPipe.DisposeLocalCopyOfClientHandle();
+            await authorizationPipe.WriteAsync(authorizationSecret, cancellationToken)
+                .ConfigureAwait(false);
+            await authorizationPipe.FlushAsync(cancellationToken).ConfigureAwait(false);
+            authorizationPipe.Dispose();
+        }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception
+            or InvalidOperationException
+            or IOException)
+        {
+            bool containmentVerified = assignedToContainment
+                ? await TerminateAndWaitAsync(process, containment).ConfigureAwait(false)
+                : await KillAndWaitAsync(process).ConfigureAwait(false);
+            return Failed(exception.Message, containmentVerified);
+        }
+        catch (OperationCanceledException)
+        {
+            bool containmentVerified = assignedToContainment
+                ? await TerminateAndWaitAsync(process, containment).ConfigureAwait(false)
+                : await KillAndWaitAsync(process).ConfigureAwait(false);
+            throw new DisposableWorkerCanceledException(
+                containmentVerified,
+                cancellationToken);
+        }
+
+        Task<string> errorRead = ReadBoundedAsync(
+            process.StandardError,
+            MaximumErrorLength,
+            cancellationToken);
+        _ = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
         using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
 
@@ -81,59 +142,97 @@ internal sealed class SystemReadProbeProcessLauncher : IReadProbeProcessLauncher
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            TryKill(process);
+            bool containmentVerified = await TerminateAndWaitAsync(process, containment)
+                .ConfigureAwait(false);
             return new ReadProbeProcessOutcome
             {
                 Started = true,
                 TimedOut = true,
+                ContainmentVerified = containmentVerified,
                 ResultProduced = File.Exists(resultPath),
-                Error = "Device Lab's read-probe worker exceeded its deadline and was killed.",
+                Error = containmentVerified
+                    ? "Device Lab's disposable self-worker exceeded its deadline and was killed."
+                    : "Device Lab's disposable self-worker exceeded its deadline, but complete descendant teardown could not be verified.",
             };
         }
         catch (OperationCanceledException)
         {
             // Closing the GUI or pressing Ctrl+C must not leave the disposable worker holding its
             // endpoint. Kill the complete tree before the caller observes cancellation.
-            TryKill(process);
-            using CancellationTokenSource exitDeadline = new(TimeSpan.FromSeconds(2));
-            try
-            {
-                await process.WaitForExitAsync(exitDeadline.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Kill already made the strongest available teardown request. Preserve the
-                // caller's cancellation rather than replacing it with a cleanup timeout.
-            }
-            throw;
+            bool containmentVerified = await TerminateAndWaitAsync(process, containment)
+                .ConfigureAwait(false);
+            throw new DisposableWorkerCanceledException(
+                containmentVerified,
+                cancellationToken);
         }
 
+        bool cleanContainment = await TerminateAndWaitAsync(process, containment).ConfigureAwait(false);
         string error = await errorRead.ConfigureAwait(false);
         return new ReadProbeProcessOutcome
         {
             Started = true,
             TimedOut = false,
+            ContainmentVerified = cleanContainment,
             ExitCode = process.ExitCode,
             ResultProduced = File.Exists(resultPath),
-            Error = string.IsNullOrWhiteSpace(error)
-                ? null
-                : error[..Math.Min(error.Length, MaximumErrorLength)],
+            Error = !cleanContainment
+                ? "Device Lab could not verify complete disposable-worker descendant teardown."
+                : string.IsNullOrWhiteSpace(error)
+                    ? null
+                    : error[..Math.Min(error.Length, MaximumErrorLength)],
         };
     }
 
-    private static ReadProbeProcessOutcome Failed(string error) => new()
+    private static ReadProbeProcessOutcome Failed(string error, bool containmentVerified = true) => new()
     {
         Started = false,
         TimedOut = false,
+        ContainmentVerified = containmentVerified,
         ResultProduced = false,
         Error = error,
     };
 
-    private static void TryKill(Process process)
+    private static async Task<bool> TerminateAndWaitAsync(
+        Process process,
+        WorkerJobObject containment)
+    {
+        bool jobEmpty = await containment.TerminateAndWaitAsync(TeardownDeadline)
+            .ConfigureAwait(false);
+        bool rootExited = await KillAndWaitAsync(process).ConfigureAwait(false);
+        return jobEmpty && rootExited;
+    }
+
+    private static async Task<string> ReadBoundedAsync(
+        TextReader reader,
+        int maximumCharacters,
+        CancellationToken cancellationToken)
+    {
+        char[] buffer = new char[4096];
+        StringBuilder bounded = new(Math.Min(maximumCharacters, buffer.Length));
+        while (true)
+        {
+            int read = await reader.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                return bounded.ToString();
+            }
+
+            int remaining = maximumCharacters - bounded.Length;
+            if (remaining > 0)
+            {
+                bounded.Append(buffer, 0, Math.Min(read, remaining));
+            }
+        }
+    }
+
+    private static async Task<bool> KillAndWaitAsync(Process process)
     {
         try
         {
-            process.Kill(entireProcessTree: true);
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
         }
         catch (InvalidOperationException)
         {
@@ -142,6 +241,30 @@ internal sealed class SystemReadProbeProcessLauncher : IReadProbeProcessLauncher
         catch (System.ComponentModel.Win32Exception)
         {
             // The supervisor still reports a deadline failure. The OS owns final process teardown.
+        }
+
+        try
+        {
+            if (process.HasExited)
+            {
+                return true;
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
+        }
+
+        using CancellationTokenSource exitDeadline = new(TimeSpan.FromSeconds(2));
+        try
+        {
+            await process.WaitForExitAsync(exitDeadline.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            // The outer operation remains bounded even if Windows has not confirmed tree exit.
+            return false;
         }
     }
 }
@@ -214,6 +337,7 @@ internal static class ReadProbeWorkerSupervisor
             return Result(ReadProbeRunStatus.Rejected, "Probe session files already exist; overwrite is forbidden.");
         }
 
+        byte[] authorizationSecret = SelfWorkerAuthorization.CreateSecret();
         ReadProbeWorkerRequest request = new()
         {
             SchemaVersion = 1,
@@ -225,30 +349,40 @@ internal static class ReadProbeWorkerSupervisor
             MaximumReadsPerSecond = metadata.MaximumReadsPerSecond,
             TimeoutMilliseconds = metadata.TimeoutMilliseconds,
             Repetitions = metadata.Repetitions,
+            AuthorizationSha256 = SelfWorkerAuthorization.Hash(authorizationSecret),
         };
-        await File.WriteAllTextAsync(
-            requestPath,
-            DeviceLabJson.Serialize(request),
-            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-            cancellationToken).ConfigureAwait(false);
+        ReadProbeProcessOutcome process;
+        try
+        {
+            await File.WriteAllTextAsync(
+                requestPath,
+                DeviceLabJson.Serialize(request),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                cancellationToken).ConfigureAwait(false);
 
-        string[] arguments =
-        [
-            ReadProbeWorker.Mode,
-            "--probe", metadata.Id,
-            "--request", requestPath,
-            "--result", resultPath,
-        ];
-        ReadProbeProcessOutcome process = await launcher.RunAsync(
-            executablePath,
-            arguments,
-            // The worker owns the semantic deadline and needs a short interval after cancelling to
-            // serialize its DeadlineExceeded response. The supervisor is only the final process
-            // containment boundary; giving both the same deadline made graceful timeout reports
-            // unreachable and misclassified every slow WMI call as a killed worker.
-            ProcessDeadline(metadata),
-            resultPath,
-            cancellationToken).ConfigureAwait(false);
+            string[] arguments =
+            [
+                ReadProbeWorker.Mode,
+                "--probe", metadata.Id,
+                "--request", requestPath,
+                "--result", resultPath,
+            ];
+            process = await launcher.RunAsync(
+                executablePath,
+                arguments,
+                // The worker owns the semantic deadline and needs a short interval after cancelling to
+                // serialize its DeadlineExceeded response. The supervisor is only the final process
+                // containment boundary; giving both the same deadline made graceful timeout reports
+                // unreachable and misclassified every slow WMI call as a killed worker.
+                ProcessDeadline(metadata),
+                resultPath,
+                authorizationSecret,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(authorizationSecret);
+        }
 
         ReadProbeRunResult? processFailure = ReadProbeOutcomeClassifier.ClassifyProcess(process);
         if (processFailure is not null)
@@ -312,6 +446,13 @@ internal static class ReadProbeOutcomeClassifier
     public static ReadProbeRunResult? ClassifyProcess(ReadProbeProcessOutcome process)
     {
         ArgumentNullException.ThrowIfNull(process);
+        if (!process.ContainmentVerified)
+        {
+            return Result(
+                ReadProbeRunStatus.WorkerHung,
+                process.Error ?? "Read-probe worker descendant teardown could not be verified.");
+        }
+
         if (!process.Started)
         {
             return Result(ReadProbeRunStatus.LaunchFailed, process.Error ?? "Read-probe worker did not start.");

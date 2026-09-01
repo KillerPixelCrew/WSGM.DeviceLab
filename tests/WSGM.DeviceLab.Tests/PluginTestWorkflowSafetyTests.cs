@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using WSGM.Device.Sdk;
 using WSGM.Device.Sdk.Capabilities;
 using WSGM.Device.Sdk.Identity;
@@ -5,6 +6,7 @@ using WSGM.Device.Sdk.Input;
 using WSGM.Device.Sdk.Lifecycle;
 using WSGM.Device.Sdk.Packaging;
 using WSGM.Device.Sdk.Plugin;
+using WSGM.DeviceLab.Application;
 using WSGM.DeviceLab.Packaging;
 using WSGM.DeviceLab.Preflight;
 using WSGM.DeviceLab.Testing;
@@ -13,6 +15,129 @@ namespace WSGM.Device.Tests;
 
 public sealed class PluginTestWorkflowSafetyTests
 {
+    [Fact]
+    public async Task Detection_RunsThroughTheAuthorizedDisposableWorker()
+    {
+        using TemporaryDirectory temporary = new();
+        string package = CreatePackage(
+            temporary,
+            OwnerReservationLifetimePlugin.Id,
+            typeof(OwnerReservationLifetimePlugin).FullName!);
+
+        string repositoryRoot = Assert.IsType<string>(
+            DeviceLabRepositoryLocator.Find(AppContext.BaseDirectory));
+        string executablePath = Path.Combine(
+            repositoryRoot,
+            "src",
+            "WSGM.DeviceLab",
+            "bin",
+            "Release",
+            "net10.0-windows",
+            "win-x64",
+            "wsgm-device.exe");
+        PluginTestReport report = await PluginTestWorkerSupervisor.TestDetectionAsync(
+            package,
+            new DeviceIdentitySnapshot(),
+            executablePath,
+            CancellationToken.None);
+
+        Assert.True(report.Passed, report.Error);
+        Assert.False(report.Detection!.Matched);
+        Assert.True(File.Exists(Path.Combine(package, OwnerReservationLifetimePlugin.DisposalMarker)));
+    }
+
+    [Fact]
+    public async Task Detection_HardDeadlineKillsAnUncooperativePluginProcess()
+    {
+        using TemporaryDirectory temporary = new();
+        string package = CreatePackage(
+            temporary,
+            HangingDetectionPlugin.Id,
+            typeof(HangingDetectionPlugin).FullName!);
+        string repositoryRoot = Assert.IsType<string>(
+            DeviceLabRepositoryLocator.Find(AppContext.BaseDirectory));
+        string executablePath = Path.Combine(
+            repositoryRoot,
+            "src",
+            "WSGM.DeviceLab",
+            "bin",
+            "Release",
+            "net10.0-windows",
+            "win-x64",
+            "wsgm-device.exe");
+        Stopwatch elapsed = Stopwatch.StartNew();
+        string descendantMarker = Path.Combine(package, HangingDetectionPlugin.DescendantMarker);
+
+        int? descendantPid = null;
+        try
+        {
+            PluginTestReport report = await PluginTestWorkerSupervisor.TestDetectionAsync(
+                package,
+                new DeviceIdentitySnapshot(),
+                executablePath,
+                TimeSpan.FromSeconds(1),
+                CancellationToken.None);
+
+            Assert.False(report.Passed);
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(8), elapsed.Elapsed.ToString());
+            Assert.Contains("deadline", report.Error, StringComparison.OrdinalIgnoreCase);
+            descendantPid = int.Parse(
+                File.ReadAllText(descendantMarker),
+                System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(
+                SpinWait.SpinUntil(() => !IsProcessRunning(descendantPid.Value), TimeSpan.FromSeconds(3)),
+                "The worker job did not terminate the plugin's descendant process.");
+        }
+        finally
+        {
+            if (descendantPid is { } pid && IsProcessRunning(pid))
+            {
+                using Process descendant = Process.GetProcessById(pid);
+                descendant.Kill(entireProcessTree: true);
+                descendant.WaitForExit(2_000);
+            }
+        }
+    }
+
+    [Fact]
+    public void HiddenWorkersRejectDirectInvocationWithoutInheritedAuthorization()
+    {
+        Assert.Equal(64, PluginTestWorker.Run([]));
+        Assert.Equal(64, WSGM.DeviceLab.Probes.ReadProbeWorker.Run([]));
+    }
+
+    [Fact]
+    public void WorkerSessionFilesMustUseExactNamesInOneNonLinkedDirectory()
+    {
+        using TemporaryDirectory temporary = new();
+        string session = temporary.GetPath("session");
+        string escaped = temporary.GetPath("other");
+        Directory.CreateDirectory(session);
+        Directory.CreateDirectory(escaped);
+        string request = Path.Combine(session, "probe-request.json");
+        File.WriteAllText(request, "{}");
+
+        bool accepted = SelfWorkerAuthorization.TryConstrainSessionFiles(
+            request,
+            Path.Combine(session, "probe-result.json"),
+            "probe-request.json",
+            "probe-result.json",
+            out string? constrainedRequest,
+            out string? constrainedResult);
+        bool escapedResult = SelfWorkerAuthorization.TryConstrainSessionFiles(
+            request,
+            Path.Combine(escaped, "probe-result.json"),
+            "probe-request.json",
+            "probe-result.json",
+            out _,
+            out _);
+
+        Assert.True(accepted);
+        Assert.Equal(Path.GetFullPath(request), constrainedRequest);
+        Assert.Equal(Path.Combine(Path.GetFullPath(session), "probe-result.json"), constrainedResult);
+        Assert.False(escapedResult);
+    }
+
     [Fact]
     public async Task RunAttended_UnconfirmedActionRefusesBeforeLoadingTheDeclaredAssembly()
     {
@@ -452,6 +577,19 @@ public sealed class PluginTestWorkflowSafetyTests
         GC.Collect();
     }
 
+    private static bool IsProcessRunning(int processId)
+    {
+        try
+        {
+            using Process process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     private static DeviceLabPathBoundaries Boundaries(TemporaryDirectory temporary) => new()
     {
         LiveDataDirectory = temporary.GetPath("never-live-data"),
@@ -466,7 +604,7 @@ public class OwnerReservationLifetimePlugin : IDevicePlugin
 
     public virtual string PackageId => Id;
 
-    public ValueTask<PluginDetectionResult> DetectAsync(
+    public virtual ValueTask<PluginDetectionResult> DetectAsync(
         PluginDetectionContext context,
         CancellationToken cancellationToken) => ValueTask.FromResult(new PluginDetectionResult
         {
@@ -514,6 +652,40 @@ public class OwnerReservationLifetimePlugin : IDevicePlugin
         string packageDirectory = Path.GetDirectoryName(typeof(OwnerReservationLifetimePlugin).Assembly.Location)!;
         File.WriteAllText(Path.Combine(packageDirectory, DisposalMarker), "disposed");
         return ValueTask.CompletedTask;
+    }
+}
+
+public sealed class HangingDetectionPlugin : OwnerReservationLifetimePlugin
+{
+    public new const string Id = "wsgm.device.synthetic.hanging-detection";
+    public const string DescendantMarker = "hanging-descendant.pid";
+
+    public override string PackageId => Id;
+
+    public override ValueTask<PluginDetectionResult> DetectAsync(
+        PluginDetectionContext context,
+        CancellationToken cancellationToken)
+    {
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("/d");
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add("ping -t 127.0.0.1 > nul");
+        Process descendant = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Synthetic descendant did not start.");
+        File.WriteAllText(
+            Path.Combine(
+                Path.GetDirectoryName(typeof(HangingDetectionPlugin).Assembly.Location)!,
+                DescendantMarker),
+            descendant.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        descendant.Dispose();
+        return new ValueTask<PluginDetectionResult>(
+            new TaskCompletionSource<PluginDetectionResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously).Task);
     }
 }
 

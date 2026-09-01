@@ -184,9 +184,9 @@ internal sealed record HardwareTestCliArguments
         else if (string.Equals(actionName, "haptic", StringComparison.Ordinal)
             || string.Equals(actionName, "controller", StringComparison.Ordinal))
         {
-            if (capabilityId is not null || instanceId is not null || valueText is not null)
+            if (capabilityId is not null || valueText is not null)
             {
-                error = "--capability, --instance, and --value apply only to --action capability.";
+                error = "--capability and --value apply only to --action capability; --instance may select an exact haptic or controller instance.";
                 return false;
             }
 
@@ -195,6 +195,7 @@ internal sealed record HardwareTestCliArguments
                 Kind = actionName is "haptic"
                     ? AttendedPluginActionKind.HapticPulse
                     : AttendedPluginActionKind.ControllerManagement,
+                InstanceId = instanceId,
             };
         }
         else
