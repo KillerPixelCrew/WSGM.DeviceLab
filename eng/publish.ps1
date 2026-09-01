@@ -3,9 +3,9 @@
     Publishes Device Lab as a self-contained win-x64 tree, with its licence notices.
 
 .DESCRIPTION
-    This is what a release ships and what WSGM pins. The output is complete on its own: a machine
-    with no .NET installed can run it, which is the point for a tool that inspects handhelds that
-    are not development machines.
+    This is what a release ships and what WSGM builds from the pinned source submodule. The output
+    is complete on its own: a machine with no .NET installed can run it, which is the point for a
+    tool that inspects handhelds that are not development machines.
 
     The .NET runtime notices are copied out of the exact restored runtime pack rather than a
     checked-in copy. A self-contained publish redistributes that runtime, so the notice has to
@@ -19,13 +19,20 @@ param(
 
     [string]$RuntimeIdentifier = "win-x64",
 
-    [string]$Version = "0.1.0"
+    [string]$Version = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root "src\WSGM.DeviceLab\WSGM.DeviceLab.csproj"
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $projectText = Get-Content -LiteralPath $project -Raw
+    if ($projectText -notmatch '<Version>([^<]+)</Version>') {
+        throw "Device Lab project does not declare a version."
+    }
+    $Version = $Matches[1]
+}
 $resolvedRoot = [IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar)
 $destination = if ([IO.Path]::IsPathRooted($OutputRoot)) {
     [IO.Path]::GetFullPath($OutputRoot)

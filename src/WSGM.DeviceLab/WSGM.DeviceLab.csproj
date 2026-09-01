@@ -6,6 +6,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <AssemblyName>wsgm-device</AssemblyName>
     <RootNamespace>WSGM.DeviceLab</RootNamespace>
+    <Version>0.1.1</Version>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>false</PublishSingleFile>
     <!-- LibraryImport generates unsafe marshalling stubs for the cfgmgr32 inventory calls. -->

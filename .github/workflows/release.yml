@@ -54,8 +54,7 @@ jobs:
         run: |
           $name = "wsgm-device-${{ steps.version.outputs.version }}-win-x64.zip"
           Compress-Archive -Path publish/* -DestinationPath $name -CompressionLevel Optimal
-          # WSGM pins this artifact by hash, so the hash is part of the release, not an
-          # afterthought a consumer has to compute by downloading it first.
+          # Publish a digest so direct-download consumers can verify the asset.
           $hash = (Get-FileHash -Path $name -Algorithm SHA256).Hash
           "name=$name"  >> $env:GITHUB_OUTPUT
           "sha256=$hash" >> $env:GITHUB_OUTPUT
@@ -73,4 +72,4 @@ jobs:
             `${{ steps.package.outputs.name }}`
             SHA-256 `${{ steps.package.outputs.sha256 }}`
 
-            Pin this in a consuming repository by asset URL and hash.
+            Git consumers can pin the repository as a submodule; the archive is for standalone use.
