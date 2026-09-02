@@ -593,7 +593,7 @@ internal static class DeviceLabCli
         writer.WriteLine("test: sample | plugin <dir> --from <inventory>");
         writer.WriteLine("scaffold --from <capture> --out-dir <new-dir> [--usb-instance <exact-id>]");
         writer.WriteLine("test hardware <dir> --from <inventory> --state-dir <new-dir> --action capability --capability <id> [--instance <id>] --value <value>");
-        writer.WriteLine("test hardware <dir> --from <inventory> --state-dir <new-dir> --action haptic|controller [--instance <id>]");
+        writer.WriteLine("test hardware <dir> --from <inventory> --state-dir <new-dir> --action haptic|haptic-sweep|controller [--instance <id>]");
         writer.WriteLine("Only 'test hardware' may access or change hardware, and it requires immediate local confirmation.");
     }
 
@@ -609,6 +609,9 @@ internal static class DeviceLabCli
             action.InstanceId is null
                 ? "one controller-management acquisition with verified topology release"
                 : $"one controller-management acquisition for {action.InstanceId} with verified topology release",
+        AttendedPluginActionKind.HapticSweep => action.InstanceId is null
+            ? "the interactive A/B-stepped haptic calibration sweep with zero-output cleanup"
+            : $"the interactive A/B-stepped haptic calibration sweep on {action.InstanceId} with zero-output cleanup",
         _ => action.Kind.ToString(),
     };
 }

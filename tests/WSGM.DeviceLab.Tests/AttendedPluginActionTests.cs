@@ -229,6 +229,83 @@ public sealed class AttendedPluginActionTests
     }
 
     [Fact]
+    public async Task HapticSweep_SteppedThroughEveryLevelReportsTheSweepFloors()
+    {
+        TestPluginHostAdapter host = await RoleHostAsync(CapabilityRole.HapticSink);
+        var plugin = new ActionTestPlugin(host);
+
+        Task<AttendedPluginActionReport> run = AttendedPluginActionRunner.RunAsync(
+            plugin,
+            host,
+            new AttendedPluginActionRequest { Kind = AttendedPluginActionKind.HapticSweep },
+            CancellationToken.None);
+        // The operator who feels every step: alternate A press and release edges until the sweep
+        // runs off its own floor in all three phases.
+        long sequence = 0;
+        while (!run.IsCompleted)
+        {
+            await host.PublishControllerSampleAsync(
+                SweepSample(++sequence, CanonicalButtons.A), CancellationToken.None);
+            await host.PublishControllerSampleAsync(
+                SweepSample(++sequence, CanonicalButtons.None), CancellationToken.None);
+            await Task.Delay(10);
+        }
+
+        AttendedPluginActionReport report = await run;
+        Assert.True(report.Passed, report.Error);
+        Assert.NotNull(report.HapticSweep);
+        Assert.True(report.HapticSweep.Completed);
+        Assert.NotNull(report.HapticSweep.ContinuousFloor);
+        Assert.Equal(8f / 255f, report.HapticSweep.ContinuousFloor.Value, 4);
+        Assert.NotNull(report.HapticSweep.TickFloor);
+        Assert.Equal(8f / 255f, report.HapticSweep.TickFloor.Value, 4);
+        Assert.Equal(TimeSpan.FromMilliseconds(5), report.HapticSweep.MinimumPulse);
+        Assert.True(report.HapticStopSent);
+        Assert.True(report.RestorationVerified);
+    }
+
+    [Fact]
+    public async Task HapticSweep_ImmediateBoundariesLeaveTheFloorsUnmeasured()
+    {
+        TestPluginHostAdapter host = await RoleHostAsync(CapabilityRole.HapticSink);
+        var plugin = new ActionTestPlugin(host);
+
+        Task<AttendedPluginActionReport> run = AttendedPluginActionRunner.RunAsync(
+            plugin,
+            host,
+            new AttendedPluginActionRequest { Kind = AttendedPluginActionKind.HapticSweep },
+            CancellationToken.None);
+        // The operator who feels nothing at all: B at every prompt. No boundary is invented from
+        // an unfelt sweep — a null floor means "below the sweep, declare the smallest value".
+        long sequence = 0;
+        while (!run.IsCompleted)
+        {
+            await host.PublishControllerSampleAsync(
+                SweepSample(++sequence, CanonicalButtons.B), CancellationToken.None);
+            await host.PublishControllerSampleAsync(
+                SweepSample(++sequence, CanonicalButtons.None), CancellationToken.None);
+            await Task.Delay(10);
+        }
+
+        AttendedPluginActionReport report = await run;
+        Assert.True(report.Passed, report.Error);
+        Assert.NotNull(report.HapticSweep);
+        Assert.True(report.HapticSweep.Completed);
+        Assert.Null(report.HapticSweep.ContinuousFloor);
+        Assert.Null(report.HapticSweep.TickFloor);
+        Assert.Null(report.HapticSweep.MinimumPulse);
+    }
+
+    private static CanonicalControllerSample SweepSample(long sequence, CanonicalButtons buttons) =>
+        new()
+        {
+            Sequence = sequence,
+            CycleGeneration = 7,
+            Timestamp = DateTimeOffset.UtcNow,
+            Buttons = buttons,
+        };
+
+    [Fact]
     public async Task CapabilityValue_TextIsValidatedAppliedAndRestored()
     {
         var host = new TestPluginHostAdapter(cycleGeneration: 7);

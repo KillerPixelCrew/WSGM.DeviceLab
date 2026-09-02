@@ -23,6 +23,13 @@ internal enum AttendedPluginActionKind
 
     /// <summary>Acquire controller management once, then release and verify the restored topology.</summary>
     ControllerManagement,
+
+    /// <summary>
+    /// Interactive motor calibration: descending haptic sweeps stepped by the device's own A
+    /// button, with B marking the perception boundary, producing the measured
+    /// <c>MinimumStartIntensity</c> and <c>MinimumPulse</c> for the plugin's haptic capabilities.
+    /// </summary>
+    HapticSweep,
 }
 
 /// <summary>Direct input for one compiled attended plugin action.</summary>
@@ -98,8 +105,32 @@ internal sealed record AttendedPluginActionReport
     /// <summary>Whether the changed value or controller topology was restored and verified.</summary>
     public required bool RestorationVerified { get; init; }
 
+    /// <summary>Measured sweep boundaries for <see cref="AttendedPluginActionKind.HapticSweep"/>.</summary>
+    public AttendedHapticSweepReport? HapticSweep { get; init; }
+
     /// <summary>Failure detail when the action or mandatory restoration was not verified.</summary>
     public string? Error { get; init; }
+}
+
+/// <summary>Perception boundaries measured by the attended haptic sweep.</summary>
+/// <remarks>
+/// Each boundary is the last value the operator confirmed feeling before pressing B; a null
+/// boundary means the operator felt every step, so the true boundary lies below the sweep floor
+/// and the smallest swept value is the honest declaration.
+/// </remarks>
+internal sealed record AttendedHapticSweepReport
+{
+    /// <summary>Weakest continuous drive the operator felt, 0..1. Informational only.</summary>
+    public float? ContinuousFloor { get; init; }
+
+    /// <summary>Weakest 30 ms tick the operator felt, 0..1 — the <c>MinimumStartIntensity</c>.</summary>
+    public float? TickFloor { get; init; }
+
+    /// <summary>Shortest full-strength pulse the operator felt — the <c>MinimumPulse</c>.</summary>
+    public TimeSpan? MinimumPulse { get; init; }
+
+    /// <summary>Whether every phase ran to an operator-confirmed boundary or sweep end.</summary>
+    public required bool Completed { get; init; }
 }
 
 /// <summary>Executes the three explicit semantic actions available behind Device Lab's attended gate.</summary>
@@ -107,6 +138,22 @@ internal static class AttendedPluginActionRunner
 {
     private static readonly TimeSpan ActionBudget = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan HapticPulseDuration = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Overall attended budget for the interactive haptic sweep.</summary>
+    private static readonly TimeSpan SweepBudget = TimeSpan.FromMinutes(5);
+
+    /// <summary>Descending drive levels swept by the strength phases, on the 0..1 output scale.</summary>
+    private static readonly float[] SweepLevels = [.. new[]
+    {
+        255, 224, 192, 160, 128, 112, 96, 80, 64, 56, 48, 40, 32, 24, 16, 8,
+    }.Select(static level => level / 255f)];
+
+    /// <summary>Descending pulse lengths swept at full strength by the duration phase.</summary>
+    private static readonly int[] SweepPulseMilliseconds =
+        [200, 150, 120, 90, 70, 55, 45, 35, 28, 22, 17, 13, 10, 7, 5];
+
+    /// <summary>Tick length used while sweeping the event floor.</summary>
+    private const int TickPulseMilliseconds = 30;
 
     /// <summary>Executes one selected action and its action-specific verified restoration.</summary>
     /// <param name="plugin">Already-started exact-device plugin.</param>
@@ -136,6 +183,11 @@ internal static class AttendedPluginActionRunner
                 request,
                 cancellationToken),
             AttendedPluginActionKind.ControllerManagement => RunControllerActionAsync(
+                plugin,
+                host,
+                request,
+                cancellationToken),
+            AttendedPluginActionKind.HapticSweep => RunHapticSweepAsync(
                 plugin,
                 host,
                 request,
@@ -486,6 +538,322 @@ internal static class AttendedPluginActionRunner
 
         error = null;
         return true;
+    }
+
+    /// <summary>Runs the interactive three-phase motor calibration behind the attended gate.</summary>
+    /// <remarks>
+    /// Self-paced on the device's own controls, because perception is the instrument: A steps the
+    /// sweep (confirming the previous step was felt), B marks the boundary. Phase one holds a
+    /// continuous drive at descending levels (informational — the host never floors continuous
+    /// output), phase two fires 30 ms ticks at descending levels (the
+    /// <c>MinimumStartIntensity</c>), phase three fires full-strength pulses of descending length
+    /// (the <c>MinimumPulse</c>). Prompts go to standard error like every other attended
+    /// diagnostic; the measured boundaries travel in the report.
+    /// </remarks>
+    private static async Task<AttendedPluginActionReport> RunHapticSweepAsync(
+        IDevicePlugin plugin,
+        TestPluginHostAdapter host,
+        AttendedPluginActionRequest request,
+        CancellationToken cancellationToken)
+    {
+        const AttendedPluginActionKind kind = AttendedPluginActionKind.HapticSweep;
+        if (!TrySelectRole(host, CapabilityRole.HapticSink, request.InstanceId,
+            out CapabilityDescriptorSet? descriptorSet,
+            out CapabilityDescriptor? descriptor, out string? selectionError))
+        {
+            return Failed(kind, selectionError!);
+        }
+
+        long controllerGeneration;
+        try
+        {
+            controllerGeneration = NextCycleGeneration(host);
+        }
+        catch (OverflowException)
+        {
+            return Failed(kind, "A fresh controller cycle generation could not be allocated.");
+        }
+
+        bool managementAttempted = false;
+        bool managementEnabled = false;
+        bool availabilityObserved = false;
+        bool stopAttempted = false;
+        bool stopSent = false;
+        bool restorationVerified = false;
+        PluginControllerRelease? release = null;
+        AttendedHapticSweepReport? sweep = null;
+        string? error = null;
+        try
+        {
+            managementAttempted = true;
+            await plugin.SetControllerManagementAsync(
+                new PluginControllerManagementContext(
+                    Enabled: true,
+                    controllerGeneration,
+                    DateTimeOffset.UtcNow + SweepBudget),
+                cancellationToken).ConfigureAwait(false);
+            managementEnabled = true;
+            availabilityObserved = IsAvailableAtGeneration(
+                host,
+                descriptorSet!,
+                descriptor!,
+                controllerGeneration);
+            if (!availabilityObserved)
+            {
+                AppendError(ref error,
+                    $"The plugin did not publish {CapabilityRole.HapticSink} as available for controller generation {controllerGeneration}.");
+            }
+            else
+            {
+                sweep = await RunSweepPhasesAsync(plugin, host, controllerGeneration, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            AppendError(ref error, $"{ActionLabel(kind)} failed: {exception.Message}");
+        }
+        finally
+        {
+            stopAttempted = true;
+            try
+            {
+                using CancellationTokenSource stopDeadline = Deadline();
+                await plugin.ApplyHapticOutputAsync(
+                    HapticOutputFrame.Stop(controllerGeneration, DateTimeOffset.UtcNow),
+                    stopDeadline.Token).ConfigureAwait(false);
+                stopSent = true;
+            }
+            catch (Exception exception)
+            {
+                AppendError(ref error, $"Haptic zero-output cleanup failed: {exception.Message}");
+            }
+
+            if (managementAttempted)
+            {
+                try
+                {
+                    using CancellationTokenSource releaseDeadline = Deadline();
+                    release = await plugin.ReleaseControllerAsync(
+                        new PluginControllerReleaseContext(
+                            HandoffScope.ControllerOnly,
+                            DateTimeOffset.UtcNow + ActionBudget),
+                        releaseDeadline.Token).ConfigureAwait(false);
+                    restorationVerified = IsVerifiedRelease(release);
+                    if (!restorationVerified)
+                    {
+                        AppendError(ref error,
+                            $"Controller topology restore was not verified ({release.Step}, {release.Result}).");
+                    }
+                }
+                catch (Exception exception)
+                {
+                    AppendError(ref error, $"Controller topology restore failed: {exception.Message}");
+                }
+            }
+        }
+
+        return new AttendedPluginActionReport
+        {
+            Kind = kind,
+            Passed = managementEnabled && availabilityObserved && sweep is { Completed: true }
+                && stopSent && restorationVerified && error is null,
+            CapabilityId = descriptor!.CapabilityId,
+            InstanceId = descriptor.InstanceId,
+            HapticStopAttempted = stopAttempted,
+            HapticStopSent = stopSent,
+            ControllerManagementEnabled = managementEnabled,
+            ControllerAvailabilityObserved = availabilityObserved,
+            ControllerRelease = release,
+            RestorationVerified = restorationVerified,
+            HapticSweep = sweep,
+            Error = error,
+        };
+    }
+
+    private static async Task<AttendedHapticSweepReport> RunSweepPhasesAsync(
+        IDevicePlugin plugin,
+        TestPluginHostAdapter host,
+        long controllerGeneration,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + SweepBudget;
+        SweepStepReader steps = new(host);
+        Task Apply(float level) => plugin.ApplyHapticOutputAsync(
+            new HapticOutputFrame
+            {
+                TargetGeneration = controllerGeneration,
+                LowFrequency = level,
+                HighFrequency = level,
+                Timestamp = DateTimeOffset.UtcNow,
+            },
+            cancellationToken).AsTask();
+        Task Stop() => plugin.ApplyHapticOutputAsync(
+            HapticOutputFrame.Stop(controllerGeneration, DateTimeOffset.UtcNow),
+            cancellationToken).AsTask();
+
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Haptic sweep: A on the device steps the sweep, B marks the boundary.");
+
+        // Phase 1: continuous drive, descending. A means "I feel this, go weaker"; B means "I no
+        // longer feel it", so the boundary is the last A-confirmed level.
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Phase 1/3 - continuous strength. Rumble is running; A = felt, step weaker; B = can no longer feel it.");
+        float? continuousFloor = null;
+        for (int index = 0; index < SweepLevels.Length; index++)
+        {
+            Console.Error.WriteLine(FormattableString.Invariant(
+                $"  level {index + 1}/{SweepLevels.Length}: {SweepLevels[index]:F3}"));
+            await Apply(SweepLevels[index]).ConfigureAwait(false);
+            if (await steps.WaitAsync(deadline, cancellationToken).ConfigureAwait(false) == SweepStep.Boundary)
+            {
+                break;
+            }
+
+            continuousFloor = SweepLevels[index];
+        }
+
+        await Stop().ConfigureAwait(false);
+
+        // Phases 2 and 3: A fires the next pulse (confirming the previous one was felt); B marks
+        // the previous pulse as the last one felt.
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Phase 2/3 - 30 ms ticks. A = fire next weaker tick; B = did NOT feel the last one.");
+        float? tickFloor = await RunPulsePhaseAsync(
+            steps,
+            SweepLevels,
+            level => FirePulseAsync(Apply, Stop, TimeSpan.FromMilliseconds(TickPulseMilliseconds), level, cancellationToken),
+            static (levels, lastFelt) => lastFelt >= 0 ? levels[lastFelt] : (float?)null,
+            deadline,
+            cancellationToken).ConfigureAwait(false);
+
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Phase 3/3 - full-strength pulses. A = fire next shorter pulse; B = did NOT feel the last one.");
+        float? pulseBoundary = await RunPulsePhaseAsync(
+            steps,
+            [.. SweepPulseMilliseconds.Select(static ms => (float)ms)],
+            ms => FirePulseAsync(Apply, Stop, TimeSpan.FromMilliseconds(ms), 1f, cancellationToken),
+            static (milliseconds, lastFelt) => lastFelt >= 0 ? milliseconds[lastFelt] : (float?)null,
+            deadline,
+            cancellationToken).ConfigureAwait(false);
+
+        AttendedHapticSweepReport report = new()
+        {
+            ContinuousFloor = continuousFloor,
+            TickFloor = tickFloor,
+            MinimumPulse = pulseBoundary is { } milliseconds
+                ? TimeSpan.FromMilliseconds(milliseconds)
+                : null,
+            Completed = true,
+        };
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Sweep complete. Declare in HapticCapabilities:");
+        Console.Error.WriteLine(FormattableString.Invariant(
+            $"  MinimumStartIntensity = {report.TickFloor ?? SweepLevels[^1]:F3}f"));
+        Console.Error.WriteLine(FormattableString.Invariant(
+            $"  MinimumPulse = TimeSpan.FromMilliseconds({(report.MinimumPulse ?? TimeSpan.FromMilliseconds(SweepPulseMilliseconds[^1])).TotalMilliseconds:F0})"));
+        return report;
+    }
+
+    private static async Task<float?> RunPulsePhaseAsync(
+        SweepStepReader steps,
+        float[] values,
+        Func<float, Task> fire,
+        Func<float[], int, float?> boundary,
+        DateTimeOffset deadline,
+        CancellationToken cancellationToken)
+    {
+        int lastFired = -1;
+        while (lastFired < values.Length - 1)
+        {
+            Console.Error.WriteLine(FormattableString.Invariant(
+                $"  press A for step {lastFired + 2}/{values.Length} ({values[lastFired + 1]:F3})"));
+            if (await steps.WaitAsync(deadline, cancellationToken).ConfigureAwait(false) == SweepStep.Boundary)
+            {
+                // The boundary refers to the last fired pulse; everything before it was felt.
+                return boundary(values, lastFired - 1);
+            }
+
+            lastFired++;
+            await fire(values[lastFired]).ConfigureAwait(false);
+        }
+
+        // The operator felt every pulse the sweep offered.
+        return boundary(values, lastFired);
+    }
+
+    private static async Task FirePulseAsync(
+        Func<float, Task> apply,
+        Func<Task> stop,
+        TimeSpan duration,
+        float level,
+        CancellationToken cancellationToken)
+    {
+        await apply(level).ConfigureAwait(false);
+        try
+        {
+            await Task.Delay(duration, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await stop().ConfigureAwait(false);
+        }
+    }
+
+    private enum SweepStep
+    {
+        Advance,
+        Boundary,
+    }
+
+    /// <summary>Turns the plugin's own published controller samples into sweep steps.</summary>
+    /// <remarks>
+    /// Polls the recording host adapter for fresh samples and reports rising edges of A and B.
+    /// The device under calibration is also the input device — that is the point: no keyboard
+    /// reach, and the samples prove the controller path is alive while the sweep runs.
+    /// </remarks>
+    private sealed class SweepStepReader(TestPluginHostAdapter host)
+    {
+        private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(25);
+        private readonly TestPluginHostAdapter _host = host;
+        private int _consumed = host.ControllerSamples.Count;
+        private bool _aHeld;
+        private bool _bHeld;
+
+        public async Task<SweepStep> WaitAsync(
+            DateTimeOffset deadline,
+            CancellationToken cancellationToken)
+        {
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                IReadOnlyList<CanonicalControllerSample> samples = _host.ControllerSamples;
+                for (; _consumed < samples.Count; _consumed++)
+                {
+                    CanonicalButtons buttons = samples[_consumed].Buttons;
+                    bool a = (buttons & CanonicalButtons.A) != 0;
+                    bool b = (buttons & CanonicalButtons.B) != 0;
+                    bool aEdge = a && !_aHeld;
+                    bool bEdge = b && !_bHeld;
+                    _aHeld = a;
+                    _bHeld = b;
+                    if (bEdge)
+                    {
+                        _consumed++;
+                        return SweepStep.Boundary;
+                    }
+
+                    if (aEdge)
+                    {
+                        _consumed++;
+                        return SweepStep.Advance;
+                    }
+                }
+
+                await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+            }
+
+            throw new TimeoutException("The haptic sweep timed out waiting for an A or B press.");
+        }
     }
 
     private static bool TrySelectRole(

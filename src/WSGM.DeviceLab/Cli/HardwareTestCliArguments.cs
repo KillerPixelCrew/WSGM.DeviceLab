@@ -182,6 +182,7 @@ internal sealed record HardwareTestCliArguments
             };
         }
         else if (string.Equals(actionName, "haptic", StringComparison.Ordinal)
+            || string.Equals(actionName, "haptic-sweep", StringComparison.Ordinal)
             || string.Equals(actionName, "controller", StringComparison.Ordinal))
         {
             if (capabilityId is not null || valueText is not null)
@@ -192,15 +193,18 @@ internal sealed record HardwareTestCliArguments
 
             action = new AttendedPluginActionRequest
             {
-                Kind = actionName is "haptic"
-                    ? AttendedPluginActionKind.HapticPulse
-                    : AttendedPluginActionKind.ControllerManagement,
+                Kind = actionName switch
+                {
+                    "haptic" => AttendedPluginActionKind.HapticPulse,
+                    "haptic-sweep" => AttendedPluginActionKind.HapticSweep,
+                    _ => AttendedPluginActionKind.ControllerManagement,
+                },
                 InstanceId = instanceId,
             };
         }
         else
         {
-            error = "test hardware requires exactly one --action capability, --action haptic, or --action controller.";
+            error = "test hardware requires exactly one --action capability, --action haptic, --action haptic-sweep, or --action controller.";
             return false;
         }
 
