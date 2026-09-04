@@ -1,0 +1,96 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+tone_instructions: >-
+  Be concise and evidence-first. Report only actionable defects with a concrete trigger, impact,
+  and smallest safe correction; omit praise, style nitpicks, and generic security advice.
+
+reviews:
+  profile: chill
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/bin/**"
+    - "!**/obj/**"
+    - "!publish/**"
+    - "!**/TestResults/**"
+  path_instructions:
+    - path: "src/WSGM.DeviceLab/{Application,Cli,Gui}/**"
+      instructions: |
+        Keep GUI and CLI behavior on the same application services and result models. Preserve
+        stdout JSON versus stderr diagnostics, exit codes 0/64/70, cancellation, off-UI-thread
+        execution, duplicate-operation rejection, and the last successful GUI result after a later
+        failure or cancellation. Internal worker modes must remain authenticated and non-public.
+    - path: "src/WSGM.DeviceLab/{Testing,Probes}/**"
+      instructions: |
+        Review this as a hardware and arbitrary-code safety boundary. Read probes must stay exactly
+        device- and endpoint-gated, typed, bounded, read-only, one-use authenticated, and killed as
+        a process tree at deadline. Plugin tests execute arbitrary plugin code with the user's
+        authority: a worker and job object provide containment, not a sandbox. The hardware-test
+        path must reject CI, non-interactive use, every --yes form, missing fresh confirmation,
+        reused state directories, identity drift, and unsafe cleanup. Static refusal must happen
+        before plugin load. The global device-owner mutex must cover construction through verified
+        stop/disposal and be retained for process lifetime when cleanup is uncertain.
+    - path: "src/WSGM.DeviceLab/{Capture,Preflight}/**"
+      instructions: |
+        Preserve separate hash-bound approval for local interactive observation and for the sanitized
+        export preview. Keep private evidence separate from shareable output. User artifacts must use
+        create-new, owned, non-reparse targets; reject roots, the broad home directories themselves,
+        the repository root itself, and the live local WSGM state tree including descendants.
+    - path: "src/WSGM.DeviceLab/{Packaging,Scaffolding,Templates}/**"
+      instructions: |
+        Package validation must remain static and never load plugin code. Require bounded fail-closed
+        manifest, layout, managed-x64 PE, count, size, and prohibited-file checks; retained input
+        handles; deterministic archives; and staging plus atomic publication. Generated projects,
+        manifests, tests, glyph profiles, and docs must agree on API version, target framework,
+        package identity, and the exact checked-out SDK reference.
+    - path: "src/WSGM.DeviceLab/{Inventory,Fixtures}/**"
+      instructions: |
+        Treat imported inventory, fixtures, recipes, and captures as untrusted evidence. Keep parsing
+        bounded and deterministic, redact sensitive machine data where required, and do not turn
+        correlation or heuristics into claims of hardware identity or causation.
+    - path: "tests/**"
+      instructions: |
+        Require focused tests for changed refusal paths, worker authentication and deadlines, mutex
+        lifetime, output ownership, package limits and determinism, approvals, and cancellation.
+        Tests and CI must remain unattended and must not touch live hardware.
+    - path: "eng/**"
+      instructions: |
+        Preserve the marked, repository-child publish-root ownership checks and atomic replacement
+        rules. Publishing must remain self-contained win-x64, versioned from the project unless
+        explicitly overridden, and include notices matching the restored runtime.
+    - path: ".github/workflows/**"
+      instructions: |
+        Require recursive submodule checkout, Windows .NET 10 Release build/tests, unattended-only
+        CI, least-privilege permissions, and release version/artifact/hash consistency. Never add a
+        live hardware test to CI.
+    - path: ".gitmodules"
+      instructions: |
+        Treat the SDK as a commit-pinned source dependency. Flag floating refs, unexpected URLs, or
+        changes that make recursive checkout non-reproducible.
+    - path: "external/**"
+      instructions: |
+        Review gitlink changes as deliberate dependency updates. Require the direct SDK pin to match
+        the contract the source, templates, tests, and documentation target; do not replace it with
+        an unreviewed branch or package dependency.
+    - path: "README.md"
+      instructions: |
+        Keep the command inventory, attended-versus-unattended warnings, approval model, output
+        behavior, recursive-clone requirement, and Release validation commands aligned with code.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
